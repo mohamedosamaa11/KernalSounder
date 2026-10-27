@@ -19,6 +19,7 @@ import psutil
 from config import (
     APP_FALLBACKS,
     CLOSE_NAME_ALIASES,
+    FRIENDLY_APP_NAMES,
     PROCESS_LIST_LIMIT,
     SUBPROCESS_TIMEOUT_SEC,
     WORKSPACE,
@@ -103,10 +104,11 @@ def execute(command: ParsedCommand, validation: ValidationResult) -> ExecutionRe
     display = validation.display_command
 
     try:
-        if intent == Intent.HELP:
-            from nlp_engine import HELP_TEXT
+        if intent in (Intent.HELP, Intent.LIST_APPS):
+            from nlp_engine import APPS_HELP_TEXT, HELP_TEXT
 
-            return ExecutionResult(True, HELP_TEXT, HELP_TEXT, display)
+            spoken = APPS_HELP_TEXT if intent == Intent.LIST_APPS else HELP_TEXT
+            return ExecutionResult(True, spoken, spoken, display)
 
         if intent == Intent.SHOW_USAGE:
             snapshot = _usage_snapshot()
@@ -136,7 +138,8 @@ def execute(command: ParsedCommand, validation: ValidationResult) -> ExecutionRe
                 start_new_session=True,
                 cwd=str(WORKSPACE),
             )
-            spoken = f"Opening {validation.app_binary}."
+            nice = FRIENDLY_APP_NAMES.get(validation.app_binary or "", validation.app_binary)
+            spoken = f"Opening {nice}."
             return ExecutionResult(True, spoken, spoken, display)
 
         if intent == Intent.CLOSE_APP:

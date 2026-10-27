@@ -37,30 +37,72 @@ MONITOR_INTERVAL_SEC = 1.5
 GUI_QUEUE_POLL_MS = 80
 MAX_LOG_WIDGET_LINES = 200
 
-# Applications the voice layer is allowed to launch or stop.
-APP_WHITELIST = {
+# Generic spoken words -> Ubuntu binaries. NLP matches the longest key.
+SPOKEN_APP_MAP = {
     "firefox": "firefox",
     "browser": "firefox",
+    "internet": "firefox",
+    "web": "firefox",
+    "web browser": "firefox",
     "chrome": "google-chrome",
     "google chrome": "google-chrome",
     "chromium": "chromium-browser",
     "terminal": "gnome-terminal",
     "console": "gnome-terminal",
+    "command line": "gnome-terminal",
+    "commandline": "gnome-terminal",
+    "shell": "gnome-terminal",
     "gnome terminal": "gnome-terminal",
     "xterm": "xterm",
     "files": "nautilus",
+    "folder": "nautilus",
+    "folders": "nautilus",
     "file manager": "nautilus",
+    "explorer": "nautilus",
     "nautilus": "nautilus",
+    "home folder": "nautilus",
+    "videos": "totem",
+    "video": "totem",
+    "player": "totem",
+    "movie": "totem",
+    "movies": "totem",
+    "video player": "totem",
+    "media player": "totem",
+    "media": "totem",
+    "totem": "totem",
+    "vlc": "vlc",
     "editor": "gedit",
     "text editor": "gedit",
     "gedit": "gedit",
+    "notes editor": "gedit",
     "calculator": "gnome-calculator",
     "calc": "gnome-calculator",
     "evince": "evince",
     "reader": "evince",
+    "pdf": "evince",
     "image viewer": "eog",
+    "pictures": "eog",
+    "photos": "eog",
+    "images": "eog",
     "eog": "eog",
-    "vlc": "vlc",
+}
+
+# Same mapping used by the security whitelist (never launch outside this table).
+APP_WHITELIST = SPOKEN_APP_MAP
+
+FRIENDLY_APP_NAMES = {
+    "firefox": "the browser",
+    "google-chrome": "Chrome",
+    "chromium-browser": "Chromium",
+    "gnome-terminal": "the terminal",
+    "xterm": "the terminal",
+    "nautilus": "the file manager",
+    "totem": "the video player",
+    "vlc": "VLC",
+    "gedit": "the text editor",
+    "gnome-calculator": "the calculator",
+    "evince": "the document reader",
+    "eog": "the image viewer",
 }
 
 CLOSE_NAME_ALIASES = {
@@ -70,7 +112,9 @@ CLOSE_NAME_ALIASES = {
     "chromium-browser": ["chromium", "chromium-browser"],
     "nautilus": ["nautilus"],
     "gedit": ["gedit"],
-    "vlc": ["vlc"],
+    "vlc": ["vlc", "totem"],
+    "totem": ["totem", "vlc"],
+    "eog": ["eog"],
 }
 
 APP_FALLBACKS = {
@@ -80,6 +124,10 @@ APP_FALLBACKS = {
     "google-chrome": ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"],
     "chromium-browser": ["chromium-browser", "chromium"],
     "gnome-calculator": ["gnome-calculator", "kcalc", "galculator"],
+    "totem": ["totem", "vlc", "mpv", "celluloid"],
+    "vlc": ["vlc", "totem", "mpv"],
+    "eog": ["eog", "gpicview", "gwenview", "eom"],
+    "evince": ["evince", "okular", "atril"],
 }
 
 PROTECTED_PROCESS_NAMES = frozenset(

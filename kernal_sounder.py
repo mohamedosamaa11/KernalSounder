@@ -38,7 +38,7 @@ from config import (
 )
 from executor import ExecutionResult, execute
 from gui import KernelSounderGUI
-from nlp_engine import parse_command
+from nlp_engine import FALLBACK_TEXT, parse_command
 from security import (
     Intent,
     ParsedCommand,
@@ -253,16 +253,15 @@ class KernelSounder:
             return
 
         if parsed.intent == Intent.UNKNOWN or parsed.confidence < 0.45:
-            reason = "Command was not mapped to a supported intent. Raw text was discarded."
             self.gui.emit(
                 "validation",
                 state=ValidationState.BLOCKED.value,
-                reason=reason,
+                reason=FALLBACK_TEXT,
                 argv="(blocked — raw voice is never a shell command)",
             )
-            self.gui.emit("log", text=f"Unmapped: {text!r}", tag="warn")
-            self.gui.emit("status", text="I did not understand. Say help for examples.")
-            self.tts.speak("I did not understand that command.")
+            self.gui.emit("log", text=f"Unmapped: {text!r}\n{FALLBACK_TEXT}", tag="warn")
+            self.gui.emit("status", text=FALLBACK_TEXT)
+            self.tts.speak(FALLBACK_TEXT)
             return
 
         result = validate(parsed)

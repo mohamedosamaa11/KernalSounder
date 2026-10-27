@@ -54,6 +54,7 @@ class Intent(str, Enum):
     SHOW_PROCESSES = "SHOW_PROCESSES"
     SHOW_USAGE = "SHOW_USAGE"
     HELP = "HELP"
+    LIST_APPS = "LIST_APPS"
     CONFIRM = "CONFIRM"
     CANCEL = "CANCEL"
     UNKNOWN = "UNKNOWN"
@@ -143,7 +144,10 @@ def resolve_app(spoken_app: str) -> str:
     if contained:
         best = max(contained, key=len)
         return APP_WHITELIST[best]
-    raise SecurityError(f"'{spoken_app}' is not on the application whitelist.")
+    raise SecurityError(
+            f"I don't know the app '{spoken_app}'. "
+            "Try browser, files, terminal, videos, editor, or calculator."
+        )
 
 
 def validate(command: ParsedCommand) -> ValidationResult:
@@ -160,14 +164,18 @@ def validate(command: ParsedCommand) -> ValidationResult:
         if intent in (Intent.UNKNOWN,):
             return ValidationResult(
                 state=ValidationState.ERROR,
-                reason="I did not understand that command.",
+                reason=(
+                    "Command not recognized. You can ask me to list files, "
+                    "open firefox, or show cpu usage."
+                ),
             )
 
-        if intent == Intent.HELP:
+        if intent in (Intent.HELP, Intent.LIST_APPS):
+            label = "app catalog" if intent == Intent.LIST_APPS else "voice help"
             return ValidationResult(
                 state=ValidationState.SAFE,
                 reason="Help does not run a shell command.",
-                display_command="(voice help)",
+                display_command=f"({label})",
             )
 
         if intent == Intent.LIST_FILES:
