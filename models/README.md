@@ -1,15 +1,10 @@
-# Vosk model (not stored in this folder on purpose)
+# Models
 
-Download **vosk-model-small-en-us-0.15** (~40 MB) by running `../setup.sh` on Ubuntu.
+KernalSounder no longer ships a local STT model. Speech-to-text uses
+`SpeechRecognition` and Google's Web Speech API (`recognize_google()`).
 
-Direct URL: <https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip>
+The Ubuntu VM needs:
 
-After unzip the path must be:
-
-```
-models/vosk-model-small-en-us-0.15/am/
-models/vosk-model-small-en-us-0.15/conf/
-models/vosk-model-small-en-us-0.15/graph/
-```
-
-Do not use `vosk-model-en-us-0.22` (about 1.8 GB). It will pressure a 4 GB VM.
+- Internet access
+- A working microphone (VirtualBox: enable audio input)
+- `flac` (installed by `setup.sh`) so audio can be sent to Google

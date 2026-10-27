@@ -6,7 +6,7 @@ Voice interaction layer over Ubuntu Linux.
 
 Pipeline (raw voice never reaches the shell):
 
-    Microphone  ->  Vosk STT  ->  rule-based NLP  ->  validator
+    Microphone  ->  Google STT  ->  rule-based NLP  ->  validator
                                               |              |
                                               v              v
                                          Tkinter GUI    subprocess argv
@@ -15,9 +15,9 @@ Pipeline (raw voice never reaches the shell):
                                                         pyttsx3 / eSpeak
 
 Designed for a 4 GB RAM Ubuntu VM on an Intel Core i3 host:
-  STT  : vosk-model-small-en-us-0.15  (~40 MB disk, ~180–300 MB RAM)
-  TTS  : pyttsx3 + eSpeak NG          (no neural vocoder)
-  NLP  : keyword / regex matcher      (no spaCy, no transformers)
+  STT  : SpeechRecognition + recognize_google()  (cloud, no local model)
+  TTS  : pyttsx3 + eSpeak NG                     (no neural vocoder)
+  NLP  : keyword / regex matcher                 (no spaCy, no transformers)
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from config import (
     APP_NAME,
     LOG_FILE,
     MONITOR_INTERVAL_SEC,
+    STT_NETWORK_ERROR,
     WORKSPACE,
 )
 from executor import ExecutionResult, execute
@@ -47,7 +48,7 @@ from security import (
     ensure_workspace,
     validate,
 )
-from stt_engine import STTEngine
+from stt_engine import STTEngine, STTNetworkError
 from tts_engine import TTSEngine
 
 PendingDelete = Tuple[ParsedCommand, ValidationResult]
@@ -180,6 +181,13 @@ class KernelSounder:
                 continue
             try:
                 text = self.stt.listen_utterance(timeout=6.0)
+            except STTNetworkError:
+                self.gui.emit("error", text=STT_NETWORK_ERROR)
+                self.gui.emit("status", text=STT_NETWORK_ERROR)
+                self.gui.emit("log", text=STT_NETWORK_ERROR, tag="bad")
+                self.tts.speak(STT_NETWORK_ERROR)
+                time.sleep(4.0)
+                continue
             except Exception as exc:
                 logging.warning("STT utterance error: %s", exc)
                 self.gui.emit("status", text="Voice recognition hiccup. Still listening.")

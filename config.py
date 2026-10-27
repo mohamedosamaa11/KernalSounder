@@ -13,16 +13,15 @@ APP_NAME = "KernalSounder"
 APP_VERSION = "1.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_DIR = BASE_DIR / "models" / "vosk-model-small-en-us-0.15"
 LOG_FILE = BASE_DIR / "kernal_sounder.log"
 
 # File operations never leave this directory (path-confinement sandbox).
 WORKSPACE = Path.home() / "KernalSounderWorkspace"
 
-# --- Speech (Vosk small English model ~40 MB on disk, ~180–300 MB RAM) ---
-SAMPLE_RATE = 16000
-STT_BLOCKSIZE = 4000
-STT_PHRASE_PAUSE_SEC = 1.15
+# --- Speech (Google Web Speech via SpeechRecognition — no local model RAM) ---
+STT_AMBIENT_DURATION_SEC = 1
+STT_PHRASE_LIMIT_SEC = 7
+STT_NETWORK_ERROR = "Network error. Speech recognition requires internet."
 
 # --- Voice (espeak via pyttsx3 — no neural TTS weights in RAM) ---
 TTS_RATE = 160

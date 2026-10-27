@@ -10,7 +10,7 @@ Built for a **4 GB RAM Ubuntu VM** on an Intel Core i3 host.
 
 | Layer | Engine | Why this one |
 | --- | --- | --- |
-| STT | **Vosk** `vosk-model-small-en-us-0.15` (~40 MB disk, ~180–300 MB RAM) | Offline Kaldi model. Whisper-tiny is heavier and slower on i3. |
+| STT | **SpeechRecognition** + `recognize_google()` | Cloud accuracy for the demo. No local acoustic model in RAM. Needs internet. |
 | TTS | **pyttsx3 → eSpeak NG** | No neural vocoder, almost no extra RAM. |
 | NLP | **Rule-based keywords + regex** | Zero model weights. spaCy/transformers would dominate a 4 GB VM. |
 | GUI | **Tkinter** | Ships with Python; no Electron/Qt stack. |
@@ -23,7 +23,7 @@ Expected user-space footprint is well under **1 GB**, leaving headroom for Ubunt
 Microphone / typed input
         │
         ▼
-   Vosk STT  (background thread)
+   Google STT  (background thread, SpeechRecognition)
         │  text
         ▼
    NLP parser  (intent + slots only)
@@ -79,8 +79,8 @@ chmod +x setup.sh run.sh
 ./run.sh
 ```
 
-`setup.sh` installs Python, Tk, PortAudio, eSpeak NG, the venv, and the small
-Vosk model.
+`setup.sh` installs Python, Tk, PortAudio, FLAC, eSpeak NG, the venv, and
+SpeechRecognition. The VM must have **internet** for Google Speech.
 
 ### VirtualBox microphone
 
@@ -88,7 +88,7 @@ Enable **Audio** for the VM and check **Enable Audio Input**. Grant the guest
 access to the host microphone, then test with:
 
 ```bash
-python3 -c "import sounddevice as sd; print(sd.query_devices())"
+python3 -c "import speech_recognition as sr; print(sr.Microphone.list_microphone_names())"
 ```
 
 If there is no mic, use the text box at the bottom of the window — the same
@@ -99,14 +99,13 @@ validator still applies.
 ```
 kernal_sounder.py   # entry point, threads, pipeline
 config.py           # RAM-aware constants, app whitelist
-stt_engine.py       # Vosk + sounddevice
+stt_engine.py       # SpeechRecognition + recognize_google()
 tts_engine.py       # pyttsx3 worker thread
 nlp_engine.py       # intent + slot parser
 security.py         # sandbox + argv builder
 executor.py         # subprocess / psutil
 gui.py              # Tkinter console
 setup.sh / run.sh
-models/             # Vosk small model (downloaded by setup.sh)
 ```
 
 ## Concurrency
@@ -114,8 +113,8 @@ models/             # Vosk small model (downloaded by setup.sh)
 | Thread | Job |
 | --- | --- |
 | Tk main | paint GUI only |
-| `ks-stt` | capture mic + Vosk decode |
-| `ks-listen` / `ks-cmd` | NLP, validate, execute |
+| `ks-listen` | microphone + Google STT (never on the Tk thread) |
+| `ks-cmd` | NLP, validate, execute |
 | `ks-tts` | eSpeak playback |
 | `ks-monitor` | CPU / RAM / disk via psutil |
 
