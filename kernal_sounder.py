@@ -102,7 +102,7 @@ class KernelSounder:
         self.mic: Optional[MicStream] = None
         self.wake = None
         self.recorder = CommandRecorder()
-        self.speech_gate = CommandRecorder()
+        self.speech_gate = CommandRecorder(aggressiveness=3)
         self.gate_rejects = 0
         self.wake_enabled = WAKE_ENABLED and not args.no_wake
 
@@ -286,7 +286,7 @@ class KernelSounder:
                 last_wake = now
                 wake.reset()
                 speech_sec = sum(voiced) * CHUNK_SAMPLES / SAMPLE_RATE
-                if speech_sec < 0.3:
+                if speech_sec < 0.45:
                     self.gate_rejects += 1
                     logging.debug("Wake %.3f ignored: only %.2fs of speech", score, speech_sec)
                     continue

@@ -113,11 +113,11 @@ class CommandRecorder:
 
     FRAME = 320  # 20 ms at 16 kHz, a size WebRTC VAD accepts
 
-    def __init__(self) -> None:
+    def __init__(self, aggressiveness: int = VAD_AGGRESSIVENESS) -> None:
         try:
             import webrtcvad
 
-            self._vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+            self._vad = webrtcvad.Vad(aggressiveness)
         except Exception:
             self._vad = None
         self.reset()

@@ -146,7 +146,7 @@ Right-click the pill for **Talk now / Open dashboard / Quit**. Drag it anywhere.
    (melspectrogram → speech embedding), the same ones the app runs.
 4. A tiny MLP (1536 → 64 → 1, ~400 KB) is trained in numpy.
 
-At runtime a trigger must first contain at least 0.3 s of real speech
+At runtime a trigger must first contain at least 0.45 s of real speech
 (WebRTC VAD, nearly free), then it is double-checked by Whisper (without a
 vocabulary prompt, so "hi founder" is not "corrected" into "hi sounder").
 
