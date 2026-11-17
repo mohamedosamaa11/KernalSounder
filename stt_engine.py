@@ -1,135 +1,179 @@
 """
-KernalSounder — Speech-to-Text.
+KernalSounder — speech-to-text.
 
-Engine: SpeechRecognition + Google Web Speech API
-(recognizer.recognize_google). No local acoustic model is loaded, so the
-4 GB VM keeps that RAM. Recognition runs only on a background thread.
+Default backend: faster-whisper (CTranslate2, int8) running offline.
+tiny.en is ~75 MB on disk, ~150 MB in RAM and transcribes a short command in
+well under a second on a laptop CPU. A vocabulary prompt biases it toward the
+command words, which fixes most mishearings ("crate file" -> "create file").
+
+Optional backend: Google Web Speech through SpeechRecognition (needs internet).
+Both receive the same 16 kHz int16 audio from audio.MicStream.
 """
 
 from __future__ import annotations
 
+import difflib
+import re
 import threading
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
+
+import numpy as np
 
 from config import (
-    STT_AMBIENT_DURATION_SEC,
+    SAMPLE_RATE,
+    STT_BACKEND,
     STT_NETWORK_ERROR,
-    STT_PHRASE_LIMIT_SEC,
+    STT_VOCAB_PROMPT,
+    WHISPER_BEAM_SIZE,
+    WHISPER_COMPUTE_TYPE,
+    WHISPER_DIR,
+    WHISPER_MODEL,
+    WHISPER_THREADS,
 )
 
 
 class STTNetworkError(Exception):
-    """Raised when Google Speech cannot be reached (offline / API error)."""
+    """Raised when the cloud recognizer cannot be reached."""
+
+
+_PROMPT_WORDS = re.sub(r"[^a-z ]", " ", STT_VOCAB_PROMPT.lower()).split()
+
+
+def _looks_like_prompt_echo(text: str) -> bool:
+    words = re.sub(r"[^a-z ]", " ", text.lower()).split()
+    if len(words) < 12:
+        return False
+    joined = " ".join(words)
+    return joined in " ".join(_PROMPT_WORDS)
 
 
 class STTEngine:
-    def __init__(self, on_partial: Optional[Callable[[str], None]] = None) -> None:
-        self._on_partial = on_partial
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-        self._recognizer = None
-        self._microphone = None
-        self._source = None
+    def __init__(self, backend: str = STT_BACKEND, model: str = WHISPER_MODEL,
+                 on_status: Optional[Callable[[str], None]] = None) -> None:
+        self.backend = backend
+        self.model_name = model
+        self._on_status = on_status
+        self._model = None
+        self._load_lock = threading.Lock()
+        self.ready = threading.Event()
         self.last_error: Optional[str] = None
 
-    def available(self) -> bool:
-        try:
-            import speech_recognition as sr  # noqa: F401
-        except Exception as exc:
-            self.last_error = f"SpeechRecognition is not installed: {exc}"
-            return False
-        try:
-            import pyaudio  # noqa: F401
-        except Exception as exc:
-            self.last_error = (
-                f"PyAudio is missing ({exc}). Install portaudio19-dev and rerun setup.sh."
-            )
-            return False
-        return True
+    def _status(self, text: str) -> None:
+        if self._on_status:
+            self._on_status(text)
 
-    def start(self) -> None:
-        """
-        Open the microphone and calibrate for VM background static.
-        Must be called from a worker thread, never the Tk main loop.
-        """
-        if not self.available():
-            raise RuntimeError(self.last_error or "STT is not available.")
+    def describe(self) -> str:
+        if self.backend == "whisper":
+            return f"offline whisper {self.model_name}"
+        return "Google Web Speech (online)"
 
+    def load(self) -> bool:
+        """Load and warm up the model. Safe to call from a background thread."""
+        with self._load_lock:
+            if self.ready.is_set():
+                return True
+            if self.backend == "whisper":
+                try:
+                    self._load_whisper()
+                except Exception as exc:
+                    self.last_error = f"Offline speech model failed to load: {exc}"
+                    if self._google_available():
+                        self.backend = "google"
+                        self.last_error += " Falling back to Google speech."
+                    else:
+                        return False
+            elif not self._google_available():
+                self.last_error = "SpeechRecognition is not installed."
+                return False
+            self.ready.set()
+            return True
+
+    def _load_whisper(self) -> None:
+        from faster_whisper import WhisperModel
+
+        local = WHISPER_DIR / self.model_name
+        source = str(local) if (local / "model.bin").is_file() else self.model_name
+        self._status(f"Loading speech model ({self.model_name})…")
+        self._model = WhisperModel(
+            source,
+            device="cpu",
+            compute_type=WHISPER_COMPUTE_TYPE,
+            cpu_threads=WHISPER_THREADS,
+            num_workers=1,
+            download_root=str(WHISPER_DIR),
+        )
+        silence = np.zeros(SAMPLE_RATE // 2, dtype=np.float32)
+        list(self._model.transcribe(silence, language="en", beam_size=1, without_timestamps=True)[0])
+
+    @staticmethod
+    def _google_available() -> bool:
+        try:
+            import speech_recognition  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        if audio.size < SAMPLE_RATE // 4:
+            return ""
+        if not self.ready.is_set() and not self.load():
+            raise RuntimeError(self.last_error or "Speech recognition is unavailable.")
+        if self.backend == "whisper":
+            return self._transcribe_whisper(audio)
+        return self._transcribe_google(audio)
+
+    def _transcribe_whisper(self, audio: np.ndarray) -> str:
+        samples = audio.astype(np.float32) / 32768.0
+        segments, _info = self._model.transcribe(
+            samples,
+            language="en",
+            beam_size=WHISPER_BEAM_SIZE,
+            temperature=0.0,
+            initial_prompt=STT_VOCAB_PROMPT,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+            vad_filter=False,
+        )
+        parts = []
+        for seg in segments:
+            if seg.no_speech_prob > 0.75 and seg.avg_logprob < -0.8:
+                continue
+            parts.append(seg.text)
+        text = " ".join(parts).strip()
+        if _looks_like_prompt_echo(text):
+            return ""
+        return text
+
+    def verify_keyword(self, audio: np.ndarray, phrase: str) -> Tuple[Optional[bool], str]:
+        """Second-stage wake check. Returns (True/False, transcript) or (None, "") if it can't check.
+
+        No vocabulary prompt here on purpose: a prompt makes the model "hear" the
+        wake word in look-alikes such as "hi founder".
+        """
+        if self.backend != "whisper" or not self.ready.is_set() or self._model is None:
+            return None, ""
+        keyword = re.sub(r"[^a-z]", "", phrase.lower().split()[-1])
+        samples = audio.astype(np.float32) / 32768.0
+        segments, _info = self._model.transcribe(
+            samples, language="en", beam_size=1, temperature=0.0,
+            condition_on_previous_text=False, without_timestamps=True, vad_filter=False,
+        )
+        text = " ".join(seg.text for seg in segments).strip()
+        for word in re.findall(r"[a-z]+", text.lower()):
+            if word == keyword:
+                return True, text
+            if word[:1] == keyword[:1] and difflib.SequenceMatcher(None, word, keyword).ratio() >= 0.72:
+                return True, text
+        return False, text
+
+    def _transcribe_google(self, audio: np.ndarray) -> str:
         import speech_recognition as sr
 
-        with self._lock:
-            self._stop.clear()
-            if self._source is not None:
-                return
-            self._recognizer = sr.Recognizer()
-            self._recognizer.dynamic_energy_threshold = True
-            self._recognizer.pause_threshold = 0.8
-            self._microphone = sr.Microphone()
-            self._source = self._microphone.__enter__()
-            if self._on_partial:
-                self._on_partial("Calibrating microphone for ambient noise…")
-            self._recognizer.adjust_for_ambient_noise(
-                self._source, duration=STT_AMBIENT_DURATION_SEC
-            )
-            if self._on_partial:
-                self._on_partial("Listening…")
-
-    def stop(self) -> None:
-        self._stop.set()
-        with self._lock:
-            self._close_microphone()
-
-    def _close_microphone(self) -> None:
-        if self._microphone is not None and self._source is not None:
-            try:
-                self._microphone.__exit__(None, None, None)
-            except Exception:
-                pass
-        self._source = None
-        self._microphone = None
-
-    def listen_utterance(self, timeout: float = 6.0) -> str:
-        """
-        Capture one phrase and send it to Google. Blocks the caller thread
-        only — the Tkinter GUI keeps pumping events on the main thread.
-        """
-        import speech_recognition as sr
-
-        if self._stop.is_set():
-            return ""
-
-        with self._lock:
-            recognizer = self._recognizer
-            source = self._source
-        if recognizer is None or source is None:
-            return ""
-
+        data = sr.AudioData(audio.astype(np.int16).tobytes(), SAMPLE_RATE, 2)
         try:
-            audio = recognizer.listen(
-                source,
-                timeout=timeout,
-                phrase_time_limit=STT_PHRASE_LIMIT_SEC,
-            )
-        except sr.WaitTimeoutError:
-            return ""
-        except OSError as exc:
-            self.last_error = f"Microphone error: {exc}"
-            raise
-
-        if self._stop.is_set():
-            return ""
-
-        try:
-            text = recognizer.recognize_google(audio)
-            return (text or "").strip()
+            return (sr.Recognizer().recognize_google(data) or "").strip()
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as exc:
             self.last_error = STT_NETWORK_ERROR
             raise STTNetworkError(STT_NETWORK_ERROR) from exc
-        except Exception as exc:
-            message = str(exc).lower()
-            if any(token in message for token in ("connection", "network", "timed out", "unreachable", "name or service")):
-                self.last_error = STT_NETWORK_ERROR
-                raise STTNetworkError(STT_NETWORK_ERROR) from exc
-            raise
