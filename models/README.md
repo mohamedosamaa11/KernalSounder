@@ -1,10 +1,11 @@
 # Models
 
-KernalSounder no longer ships a local STT model. Speech-to-text uses
-`SpeechRecognition` and Google's Web Speech API (`recognize_google()`).
+| Folder | What | In git? |
+| --- | --- | --- |
+| `custom/hi_sounder.npz` | the "Hi Sounder" wake-word head trained by `train_wake_word.py` | yes (~400 KB) |
+| `custom/*_samples/` | your own voice recordings for training | **no** (private) |
+| `openwakeword/` | melspectrogram + embedding feature models, optional pretrained wake words | no, `download_models.py` |
+| `whisper/tiny.en/` | faster-whisper speech-to-text weights (~75 MB) | no, `download_models.py` |
+| `piper/` | multi-speaker TTS voice, only used for training (~75 MB) | no, downloaded by the trainer |
 
-The Ubuntu VM needs:
-
-- Internet access
-- A working microphone (VirtualBox: enable audio input)
-- `flac` (installed by `setup.sh`) so audio can be sent to Google
+Run `python download_models.py` once after cloning (the setup scripts do it).

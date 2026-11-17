@@ -2,8 +2,8 @@
 KernalSounder — command validation and sandboxing.
 
 Voice text is NEVER passed to a shell. The NLP layer produces a structured
-intent; this module decides whether that intent may be turned into a
-subprocess argument list.
+intent; this module decides whether that intent may become a concrete,
+pre-defined action (a Python file API call, a whitelisted app launch, ...).
 """
 
 from __future__ import annotations
@@ -12,17 +12,20 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from config import (
+    APP_PROCESS_NAMES,
     APP_WHITELIST,
     MAX_NAME_LENGTH,
+    PLATFORM_KEY,
     PROTECTED_PROCESS_NAMES,
     WORKSPACE,
 )
 
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]*$")
 HIDDEN_OR_SPECIAL = re.compile(r"(^\.|\.\.|[\x00-\x1f])")
+WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", re.IGNORECASE)
 
 BLOCKED_NAME_FRAGMENTS = (
     "sudo",
@@ -72,11 +75,10 @@ class ParsedCommand:
 class ValidationResult:
     state: ValidationState
     reason: str
-    argv: Optional[List[str]] = None
-    display_command: str = ""
+    action: str = ""
     resolved_path: Optional[Path] = None
     extra_path: Optional[Path] = None
-    app_binary: Optional[str] = None
+    app_id: Optional[str] = None
 
 
 class SecurityError(Exception):
@@ -91,8 +93,7 @@ def ensure_workspace() -> Path:
 def _is_inside_workspace(path: Path) -> bool:
     root = WORKSPACE.resolve()
     try:
-        resolved = path.resolve()
-        resolved.relative_to(root)
+        path.resolve().relative_to(root)
         return True
     except (ValueError, OSError):
         return False
@@ -110,8 +111,10 @@ def sanitize_name(name: str, *, allow_extension: bool = True) -> str:
         raise SecurityError("Hidden, traversal, or control characters are blocked.")
     if "/" in cleaned or "\\" in cleaned:
         raise SecurityError("Path separators are not allowed in names.")
-    if not SAFE_NAME_RE.match(cleaned):
+    if not SAFE_NAME_RE.match(cleaned) or cleaned.endswith("."):
         raise SecurityError("Name contains unsupported characters.")
+    if WINDOWS_RESERVED.match(cleaned):
+        raise SecurityError("That is a reserved device name.")
     lower = cleaned.lower()
     for fragment in BLOCKED_NAME_FRAGMENTS:
         if fragment in lower:
@@ -124,11 +127,12 @@ def sanitize_name(name: str, *, allow_extension: bool = True) -> str:
 def resolve_workspace_path(name: str, *, must_exist: Optional[bool] = None) -> Path:
     safe = sanitize_name(name)
     root = ensure_workspace()
-    path = (root / safe).resolve()
+    candidate = root / safe
+    if candidate.is_symlink():
+        raise SecurityError("Symbolic links are not allowed.")
+    path = candidate.resolve()
     if not _is_inside_workspace(path):
         raise SecurityError("Path escapes the KernalSounder workspace.")
-    if path.is_symlink():
-        raise SecurityError("Symbolic links are not allowed.")
     if must_exist is True and not path.exists():
         raise SecurityError(f"'{safe}' does not exist in the workspace.")
     if must_exist is False and path.exists():
@@ -137,36 +141,42 @@ def resolve_workspace_path(name: str, *, must_exist: Optional[bool] = None) -> P
 
 
 def resolve_app(spoken_app: str) -> str:
-    key = spoken_app.strip().lower()
+    """Map a spoken app phrase to a whitelisted logical app id."""
+    key = (spoken_app or "").strip().lower()
     if key in APP_WHITELIST:
         return APP_WHITELIST[key]
-    contained = [name for name in APP_WHITELIST if name in key]
+    padded = f" {key} "
+    contained = [name for name in APP_WHITELIST if f" {name} " in padded]
     if contained:
-        best = max(contained, key=len)
-        return APP_WHITELIST[best]
+        return APP_WHITELIST[max(contained, key=len)]
     raise SecurityError(
-            f"I don't know the app '{spoken_app}'. "
-            "Try browser, files, terminal, videos, editor, or calculator."
-        )
+        f"I don't know the app '{spoken_app}'. "
+        "Try browser, files, terminal, videos, editor, or calculator."
+    )
+
+
+def closable_process_names(app_id: str) -> list:
+    names = APP_PROCESS_NAMES.get(PLATFORM_KEY, {}).get(app_id, [])
+    return [n for n in names if n.lower() not in PROTECTED_PROCESS_NAMES]
 
 
 def validate(command: ParsedCommand) -> ValidationResult:
     """
-    Map a parsed intent to a frozen argv list.
+    Map a parsed intent to a frozen, pre-defined action.
 
-    Returns BLOCKED / NEEDS_CONFIRM / SAFE. The executor may only run argv
-    from a SAFE (or confirmed) result — never command.raw_text.
+    Returns BLOCKED / NEEDS_CONFIRM / SAFE / ERROR. The executor only acts on
+    SAFE (or user-confirmed) results and never sees command.raw_text.
     """
     intent = command.intent
     slots = command.slots
 
     try:
-        if intent in (Intent.UNKNOWN,):
+        if intent == Intent.UNKNOWN:
             return ValidationResult(
                 state=ValidationState.ERROR,
                 reason=(
                     "Command not recognized. You can ask me to list files, "
-                    "open firefox, or show cpu usage."
+                    "open the browser, or show cpu usage."
                 ),
             )
 
@@ -174,18 +184,16 @@ def validate(command: ParsedCommand) -> ValidationResult:
             label = "app catalog" if intent == Intent.LIST_APPS else "voice help"
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Help does not run a shell command.",
-                display_command=f"({label})",
+                reason="Help only speaks; nothing is executed.",
+                action=f"speak({label})",
             )
 
         if intent == Intent.LIST_FILES:
             root = ensure_workspace()
-            argv = ["ls", "-la", "--", str(root)]
             return ValidationResult(
                 state=ValidationState.SAFE,
                 reason="Listing is confined to the workspace.",
-                argv=argv,
-                display_command="ls -la -- <workspace>",
+                action="list_dir(<workspace>)",
                 resolved_path=root,
             )
 
@@ -193,9 +201,8 @@ def validate(command: ParsedCommand) -> ValidationResult:
             path = resolve_workspace_path(slots.get("name", ""), must_exist=False)
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Create file is confined and uses touch.",
-                argv=["touch", "--", str(path)],
-                display_command=f"touch -- {path.name}",
+                reason="New empty file inside the workspace.",
+                action=f"create_file({path.name})",
                 resolved_path=path,
             )
 
@@ -203,9 +210,8 @@ def validate(command: ParsedCommand) -> ValidationResult:
             path = resolve_workspace_path(slots.get("name", ""), must_exist=False)
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Create folder is confined and uses mkdir.",
-                argv=["mkdir", "--", str(path)],
-                display_command=f"mkdir -- {path.name}",
+                reason="New folder inside the workspace.",
+                action=f"create_folder({path.name})",
                 resolved_path=path,
             )
 
@@ -216,9 +222,8 @@ def validate(command: ParsedCommand) -> ValidationResult:
                 raise SecurityError("Source and destination are the same.")
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Rename stays inside the workspace.",
-                argv=["mv", "-n", "--", str(src), str(dst)],
-                display_command=f"mv -n -- {src.name} {dst.name}",
+                reason="Rename stays inside the workspace and never overwrites.",
+                action=f"rename({src.name} -> {dst.name})",
                 resolved_path=src,
                 extra_path=dst,
             )
@@ -226,64 +231,50 @@ def validate(command: ParsedCommand) -> ValidationResult:
         if intent == Intent.DELETE_FILE:
             path = resolve_workspace_path(slots.get("name", ""), must_exist=True)
             if path.is_dir():
-                argv = ["rmdir", "--", str(path)]
-                display = f"rmdir -- {path.name}"
-                extra = " Empty folders only — recursive delete is forbidden."
+                action = f"remove_empty_folder({path.name})"
+                extra = " Empty folders only. Recursive delete is forbidden."
             else:
-                argv = ["rm", "-f", "--", str(path)]
-                display = f"rm -f -- {path.name}"
+                action = f"delete_file({path.name})"
                 extra = ""
             return ValidationResult(
                 state=ValidationState.NEEDS_CONFIRM,
                 reason="Delete requires explicit confirmation." + extra,
-                argv=argv,
-                display_command=display,
+                action=action,
                 resolved_path=path,
             )
 
         if intent == Intent.OPEN_APP:
-            binary = resolve_app(slots.get("app", ""))
+            app_id = resolve_app(slots.get("app", ""))
             return ValidationResult(
                 state=ValidationState.SAFE,
                 reason="Application is on the launch whitelist.",
-                argv=[binary],
-                display_command=binary,
-                app_binary=binary,
+                action=f"launch({app_id})",
+                app_id=app_id,
             )
 
         if intent == Intent.CLOSE_APP:
-            binary = resolve_app(slots.get("app", ""))
-            base = Path(binary).name
-            if base.lower() in {p.lower() for p in PROTECTED_PROCESS_NAMES}:
-                raise SecurityError("That process is protected and cannot be closed.")
+            app_id = resolve_app(slots.get("app", ""))
+            if not closable_process_names(app_id):
+                raise SecurityError("That app is part of the system and cannot be closed by voice.")
             return ValidationResult(
                 state=ValidationState.SAFE,
                 reason="Close is limited to a whitelisted, non-critical process.",
-                argv=["pkill", "-x", base],
-                display_command=f"pkill -x {base}",
-                app_binary=binary,
+                action=f"terminate({app_id})",
+                app_id=app_id,
             )
 
         if intent == Intent.SHOW_PROCESSES:
-            argv = [
-                "ps",
-                "-eo",
-                "pid,user,comm,%cpu,%mem",
-                "--sort=-%cpu",
-            ]
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Process listing uses a fixed ps format.",
-                argv=argv,
-                display_command="ps -eo pid,user,comm,%cpu,%mem --sort=-%cpu",
+                reason="Read-only process snapshot.",
+                action="process_snapshot(top by cpu)",
             )
 
         if intent == Intent.SHOW_USAGE:
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Usage is read from psutil plus bounded df/free calls.",
-                argv=["free", "-h"],
-                display_command="free -h && df -h / && cpu snapshot",
+                reason="Read-only CPU, RAM and disk snapshot.",
+                action="usage_snapshot(cpu, ram, disk)",
             )
 
         return ValidationResult(

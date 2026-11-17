@@ -1,5 +1,10 @@
-# KernalSounder — keep this list short. No torch, no transformers, no spaCy.
-SpeechRecognition==3.10.4
-PyAudio==0.2.14
-psutil==6.1.0
-pyttsx3==2.90
+# KernalSounder runtime — small, CPU-only. No torch, no transformers, no spaCy.
+numpy>=1.24
+sounddevice>=0.4.6
+psutil>=5.9
+pyttsx3>=2.90
+onnxruntime>=1.16
+faster-whisper>=1.0.3
+webrtcvad-wheels>=2.0.11
+# Optional: only for --stt google (cloud recognizer, needs internet)
+SpeechRecognition>=3.10
