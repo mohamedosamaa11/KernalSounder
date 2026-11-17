@@ -10,3 +10,6 @@ models/custom/*_samples/
 models/*.zip
 .idea/
 .vscode/
+models/custom/*_personal.npz
+models/custom/replay_*.npz
+models/custom/*_aliases.json

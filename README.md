@@ -164,14 +164,48 @@ At runtime a trigger must first contain at least 0.45 s of real speech
 (WebRTC VAD, nearly free), then it is double-checked by Whisper (without a
 vocabulary prompt, so "hi founder" is not "corrected" into "hi sounder").
 
-**Make it fit your voice (recommended):**
+### Train my voice (in the app, ~2 minutes)
+
+Dashboard → **Train my voice**, or right-click the pill → **Train my voice…**
+
+1. Say "Hi Sounder" 10 times.
+2. Read 5 short ordinary sentences (your voice saying something else).
+3. Stay quiet 15 s so it hears your room (TV/fan is fine).
+
+Then, in ~30 s of CPU and no extra packages:
+
+- **Learns how the recognizer hears you.** If Whisper writes your
+  "Hi Sounder" as "hi someone", that word is accepted by the second-stage
+  check from now on. This alone fixes most "it ignores me" cases.
+- **Fine-tunes the wake model** on your recordings (augmented ~10x), with
+  negatives in your own voice (your sentences plus reversed/cut versions of
+  your clips), your room, look-alike phrases spoken by the OS voices
+  (SAPI / eSpeak, "hi santa", "hi cinder"…), and an L2-SP pull toward the
+  base weights so it can't forget what it learned.
+- **Only keeps the new model if it is better** on recordings it never trained
+  on, and sets its threshold just above the highest false score it saw.
+  Otherwise the original model stays. "Keep the original" undoes everything.
+
+The app switches to the new model immediately, no restart. Your recordings
+stay in `models/custom/hi_sounder_samples/` (git-ignored).
+
+Same thing from a terminal (useful on a server or over SSH):
+
+```bash
+python train_wake_word.py record --count 10            # say "Hi Sounder" 10 times
+python train_wake_word.py record --negative --seconds 15
+python train_wake_word.py personalize                  # ~30 s
+python train_wake_word.py test                         # live score meter
+```
+
+### Full retrain (heavy, optional)
+
+Rebuilds the base model from scratch with Piper (904 synthetic speakers) plus
+your recordings. ~20 minutes on a laptop CPU, longer on a small VM:
 
 ```bash
 pip install -r requirements-train.txt
-python train_wake_word.py record --count 20            # say "Hi Sounder" 20 times
-python train_wake_word.py record --negative --seconds 60
-python train_wake_word.py train                        # ~15 min on a laptop CPU
-python train_wake_word.py test                         # live score meter
+python train_wake_word.py train
 ```
 
 Train a different phrase: `python train_wake_word.py --name hey_kernel --phrase "Hey Kernel" train`,
@@ -212,7 +246,11 @@ vocabulary.py        personal vocabulary (vocabulary.txt)
 security.py          sandbox + validator
 executor.py          cross-platform actions (no shell)
 config.py            all tunables, per-OS app tables
-train_wake_word.py   custom wake-word trainer
+train_wake_word.py   wake-word trainer (full retrain, record, personalize, test)
+personalize.py       fast on-device fine-tuning for your voice
+trainer_ui.py        "Train my voice" wizard
+os_tts.py            OS speech engine (SAPI / eSpeak) for look-alike replay
+lean_runtime.py      native-library settings that keep RAM/CPU low
 download_models.py   fetches the offline models
 autostart.py         start at login (Windows Startup / XDG autostart)
 tests/               unit tests: python -m unittest discover -s tests -t .

@@ -191,7 +191,8 @@ class STTEngine:
             return ""
         return text
 
-    def verify_keyword(self, audio: np.ndarray, phrase: str) -> Tuple[Optional[bool], str]:
+    def verify_keyword(self, audio: np.ndarray, phrase: str,
+                       aliases: Tuple[str, ...] = ()) -> Tuple[Optional[bool], str]:
         """Second-stage wake check. Returns (True/False, transcript) or (None, "") if it can't check.
 
         No vocabulary prompt here on purpose: a prompt makes the model "hear" the
@@ -207,7 +208,7 @@ class STTEngine:
         )
         text = " ".join(seg.text for seg in segments).strip()
         for word in re.findall(r"[a-z]+", text.lower()):
-            if word == keyword:
+            if word == keyword or word in aliases:
                 return True, text
             if word[:1] == keyword[:1] and difflib.SequenceMatcher(None, word, keyword).ratio() >= 0.72:
                 return True, text

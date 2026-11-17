@@ -25,10 +25,12 @@ import lean_runtime  # noqa: F401  (must run before numpy / whisper load)
 
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Optional, Tuple
 
 import psutil
@@ -96,6 +98,8 @@ class KernelSounder:
         self._state = "idle"
         self._capture_reason = ""
         self._manual = threading.Event()
+        self._enroll = None
+        self._wizard = None
         self._finish_now = threading.Event()
         self._abort = threading.Event()
         self._abort_quiet = False
@@ -103,6 +107,7 @@ class KernelSounder:
         self._wake_dirty = False
         self.mic: Optional[MicStream] = None
         self.wake = None
+        self.wake_aliases: list = []
         self.recorder = CommandRecorder()
         self.speech_gate = CommandRecorder(aggressiveness=3)
         self.gate_rejects = 0
@@ -122,7 +127,9 @@ class KernelSounder:
                 on_cancel=self.cancel_from_ui,
                 on_dashboard=self.gui_show_dashboard,
                 on_quit=self.quit,
+                on_train=self.open_trainer,
             ),
+            on_train=self.open_trainer,
             start_hidden=not args.dashboard,
             hint=hint if self.wake_enabled else "Click to talk",
             show_idle_pill=not args.no_pill and SHOW_IDLE_PILL,
@@ -144,6 +151,68 @@ class KernelSounder:
 
     def _ui(self, phase: str, text: str = "", tone: str = "info") -> None:
         self.gui.emit("overlay", phase=phase, text=text, tone=tone)
+
+    def open_trainer(self) -> None:
+        """Runs on the Tk thread (dashboard button / pill menu)."""
+        from trainer_ui import TrainerWizard
+
+        if self._wizard is not None:
+            try:
+                self._wizard.win.lift()
+                return
+            except Exception:
+                self._wizard = None
+        self._wizard = TrainerWizard(
+            self.gui.root,
+            phrase=self.args.wake_phrase,
+            begin=self._begin_enroll,
+            end=self._end_enroll,
+            train=self._run_personalize,
+            apply=self._apply_personal,
+        )
+        self._wizard.win.bind("<Destroy>", lambda e: setattr(self, "_wizard", None)
+                              if e.widget is self._wizard.win else None)
+
+    def _begin_enroll(self, session) -> bool:
+        if self.mic is None:
+            return False
+        self._quiet_abort()
+        self._enroll = session
+        self._ui("idle")
+        self.gui.emit("hint", text="Training\u2026")
+        return True
+
+    def _end_enroll(self) -> None:
+        self._enroll = None
+        self._wake_dirty = True
+        hint = f"Say \u201c{self.args.wake_phrase}\u201d" if self.wake is not None else "Click to talk"
+        self.gui.emit("hint", text=hint)
+
+    def _run_personalize(self, session, progress) -> dict:
+        from personalize import personalize, save_samples
+
+        name = Path(WAKE_MODEL).stem
+        save_samples(name, session.clips, session.background, session.others)
+        report = personalize(name, self.args.wake_phrase, session.clips, session.background,
+                             stt=self.stt, progress=progress, extra_negatives=session.others)
+        logging.info("Personalization: %s", report)
+        return report
+
+    def _apply_personal(self, use: bool) -> None:
+        from personalize import aliases_path, personal_model_path
+        from wake_word import WakeWordDetector
+
+        name = Path(WAKE_MODEL).stem
+        if not use:
+            personal_model_path(name).unlink(missing_ok=True)
+            aliases_path(name).unlink(missing_ok=True)
+        try:
+            self.wake = WakeWordDetector(self._wake_model_choice(), threshold=self._threshold_choice())
+            self.wake_aliases = self._load_wake_aliases()
+            self._log(f"Wake word now: {self.wake.name} (threshold {self.wake.threshold:.2f}, "
+                      f"aliases {self.wake_aliases or 'none'})", "ok")
+        except Exception as exc:
+            self._log(f"Could not reload the wake word: {exc}", "bad")
 
     def gui_show_dashboard(self) -> None:
         self.gui.emit("show_dashboard")
@@ -170,7 +239,8 @@ class KernelSounder:
             try:
                 from wake_word import WakeWordDetector
 
-                self.wake = WakeWordDetector(self.args.wake_model, threshold=self.args.threshold)
+                self.wake = WakeWordDetector(self._wake_model_choice(), threshold=self._threshold_choice())
+                self.wake_aliases = self._load_wake_aliases()
                 self._log(f"Wake word ready: {self.wake.name} (threshold {self.wake.threshold:.2f})", "ok")
             except Exception as exc:
                 self.wake = None
@@ -258,6 +328,10 @@ class KernelSounder:
             if chunk is None:
                 continue
             recent.append(chunk)
+            enroll = self._enroll
+            if enroll is not None:
+                enroll.feed(chunk)
+                continue
             if self._state == "capture":
                 self._capture_step(chunk)
                 continue
@@ -293,7 +367,8 @@ class KernelSounder:
                     logging.debug("Wake %.3f ignored: only %.2fs of speech", score, speech_sec)
                     continue
                 if self.args.verify:
-                    ok, heard = self.stt.verify_keyword(np.concatenate(list(recent)), self.args.wake_phrase)
+                    ok, heard = self.stt.verify_keyword(np.concatenate(list(recent)), self.args.wake_phrase,
+                                                        tuple(self.wake_aliases))
                     if ok is False:
                         logging.info("Wake %.3f rejected by verifier: %r", score, heard)
                         if self.args.collect_negatives:
@@ -303,6 +378,26 @@ class KernelSounder:
                 else:
                     logging.info("Wake word %.3f", score)
                 self._begin_capture("wake")
+
+    def _wake_model_choice(self) -> str:
+        """The personal model from 'Train my voice' wins over the default one."""
+        if self.args.wake_model == WAKE_MODEL:
+            from personalize import personal_model_path
+
+            personal = personal_model_path(Path(WAKE_MODEL).stem)
+            if personal.is_file():
+                return str(personal)
+        return self.args.wake_model
+
+    def _threshold_choice(self):
+        if self.args.threshold is not None:
+            return self.args.threshold
+        return WAKE_THRESHOLD if os.environ.get("KS_WAKE_THRESHOLD") else None
+
+    def _load_wake_aliases(self) -> list:
+        from personalize import load_aliases
+
+        return load_aliases(Path(self.args.wake_model).stem.replace("_personal", ""))
 
     def _save_hard_negative(self, audio) -> None:
         try:
@@ -596,7 +691,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--no-pill", action="store_true", help="hide the idle pill; overlay appears only on wake")
     parser.add_argument("--wake-model", default=WAKE_MODEL, help="openWakeWord .onnx model name or path")
     parser.add_argument("--wake-phrase", default=WAKE_PHRASE, help="phrase shown in the idle hint")
-    parser.add_argument("--threshold", type=float, default=WAKE_THRESHOLD, help="wake sensitivity 0..1")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="wake sensitivity 0..1 (default: the model's own, usually 0.5)")
     parser.add_argument("--no-verify", dest="verify", action="store_false", default=WAKE_VERIFY,
                         help="skip the whisper double-check of the wake word")
     parser.add_argument("--collect-negatives", action="store_true",

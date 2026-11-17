@@ -60,9 +60,9 @@ class VoiceOverlay:
                  on_talk: Callable[[], None], on_stop: Callable[[], None],
                  on_send: Callable[[], None], on_confirm: Callable[[], None],
                  on_cancel: Callable[[], None], on_dashboard: Callable[[], None],
-                 on_quit: Callable[[], None]) -> None:
+                 on_quit: Callable[[], None], on_train: Optional[Callable[[], None]] = None) -> None:
         self._cb = dict(talk=on_talk, stop=on_stop, send=on_send, confirm=on_confirm,
-                        cancel=on_cancel, dashboard=on_dashboard, quit=on_quit)
+                        cancel=on_cancel, dashboard=on_dashboard, quit=on_quit, train=on_train)
         self._hint = hint
         self._show_idle_pill = show_idle_pill
         self._phase = "idle"
@@ -106,6 +106,8 @@ class VoiceOverlay:
         self._menu = tk.Menu(self.win, tearoff=0)
         self._menu.add_command(label="Talk now", command=lambda: self._fire("talk"))
         self._menu.add_command(label="Open dashboard", command=lambda: self._fire("dashboard"))
+        if on_train is not None:
+            self._menu.add_command(label="Train my voice\u2026", command=lambda: self._fire("train"))
         self._menu.add_separator()
         self._menu.add_command(label=f"Quit {APP_NAME}", command=lambda: self._fire("quit"))
 
