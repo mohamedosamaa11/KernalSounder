@@ -52,8 +52,8 @@ EARCON = _env_bool("KS_EARCON", True)     # short chime when the wake word fires
 
 # --- Wake word (openWakeWord ONNX models, run with onnxruntime only) ----------
 WAKE_ENABLED = _env_bool("KS_WAKE", True)
-WAKE_MODEL = _env("KS_WAKE_MODEL", "hi_sounder.npz")
-WAKE_PHRASE = _env("KS_WAKE_PHRASE", "Hi Sounder")
+WAKE_MODEL = _env("KS_WAKE_MODEL", "hey_nova.npz")
+WAKE_PHRASE = _env("KS_WAKE_PHRASE", "Hey Nova")
 WAKE_THRESHOLD = _env_float("KS_WAKE_THRESHOLD", 0.5)
 # Second stage: when the wake model fires, Whisper re-checks the last 1.8 s of
 # audio for the wake word. Kills false triggers for ~0.4 s of CPU per trigger.
@@ -66,6 +66,11 @@ OWW_RELEASE_URL = "https://github.com/dscripka/openWakeWord/releases/download/v0
 
 # Words the transcriber may keep from the wake phrase; the parser drops them.
 WAKE_WORDS_TO_STRIP = (
+    "hey nova",
+    "hi nova",
+    "ok nova",
+    "okay nova",
+    "nova",
     "hi sounder",
     "high sounder",
     "hey sounder",
@@ -111,6 +116,9 @@ STT_VOCAB_PROMPT = (
 # --- Voice output -------------------------------------------------------------
 TTS_RATE = 165
 TTS_VOLUME = 0.9
+# Preferred voice name (substring). Windows: Zira / Mark / David (the newer OneCore
+# voices are tried first). Linux: an espeak voice such as mb-us1 or en-us+f3.
+TTS_VOICE = _env("KS_VOICE", "Zira" if IS_WINDOWS else "mb-us1")
 
 # --- UI -----------------------------------------------------------------------
 SHOW_IDLE_PILL = _env_bool("KS_IDLE_PILL", True)

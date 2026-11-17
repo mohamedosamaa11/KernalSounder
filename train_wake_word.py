@@ -1,5 +1,5 @@
 """
-Train a custom wake word ("Hi Sounder" by default) on this machine. No GPU, no cloud.
+Train a custom wake word ("Hey Nova" by default) on this machine. No GPU, no cloud.
 
 How it works
 ------------
@@ -47,14 +47,36 @@ FRAMES = 16
 EMB_HOP_SEC = 0.08
 EMB_CONTEXT_SEC = 0.76
 
-SOUNDALIKES = [
-    "hi sandra", "hi wonder", "hi thunder", "hi founder", "hi sunday", "hi soldier",
-    "hi sound", "hi sonny", "hi sander", "high sun", "hi summer", "hi senator", "hi saunter",
-    "hi santa", "hi sender", "hi cinder", "hi sounding", "hi sunder land", "sounder",
-    "sound good", "hi there", "hi", "hello", "hey sounds good", "my founder", "the sounder",
-    "hi wanda", "hi lender", "hi slender", "hi alexander", "why sound", "hi thunderbird",
-    "hey jarvis", "alexa", "okay google", "hey siri", "hi kernel", "hi son", "i sound older",
+# Phrases that sound close to each wake word; the model must learn they are NOT it.
+_GENERIC_SOUNDALIKES = [
+    "hey there", "hi there", "hello", "hey", "hi", "hey you", "okay", "hey jarvis", "alexa",
+    "okay google", "hey siri", "hey google", "hey man", "hey guys",
 ]
+SOUNDALIKES_BY_NAME = {
+    "hi_sounder": [
+        "hi sandra", "hi wonder", "hi thunder", "hi founder", "hi sunday", "hi soldier",
+        "hi sound", "hi sonny", "hi sander", "high sun", "hi summer", "hi senator", "hi saunter",
+        "hi santa", "hi sender", "hi cinder", "hi sounding", "hi sunder land", "sounder",
+        "sound good", "hey sounds good", "my founder", "the sounder", "hi wanda", "hi lender",
+        "hi slender", "hi alexander", "why sound", "hi thunderbird", "hi kernel", "hi son",
+        "i sound older",
+    ],
+    "hey_nova": [
+        "hey nora", "hey noah", "hey now", "hey no", "hey novak", "hey mona", "hey rover",
+        "hey over", "hey lover", "hey nevada", "hey noble", "hey nobody", "hey know what",
+        "hey not now", "hey nana", "hey nina", "hey neva", "hey nolan", "hey olivia",
+        "hey jonah", "hey donna", "hey novel", "hey november", "a nova", "the nova", "nova",
+        "bossa nova", "hey there nova", "a new one", "hey nava", "hey sofa", "hey cobra",
+        "hey yoga", "hey soda", "hey toyota", "hey innova", "hey noodle", "hey nothing",
+    ],
+}
+
+
+def soundalikes_for(name: str) -> list:
+    return SOUNDALIKES_BY_NAME.get(name, []) + _GENERIC_SOUNDALIKES
+
+
+SOUNDALIKES = soundalikes_for("hi_sounder")
 
 COMMANDS = [
     "list files", "create file called notes dot txt", "create folder called projects",
@@ -369,7 +391,8 @@ def cmd_train(args) -> int:
         if i % 250 == 249:
             print(f"  {i + 1} ({time.monotonic() - t0:.0f}s)")
 
-    negatives = [(t, 2.0) for t in SOUNDALIKES] * max(1, args.negatives // (3 * len(SOUNDALIKES)))
+    look_alikes = soundalikes_for(args.name)
+    negatives = [(t, 2.0) for t in look_alikes] * max(1, args.negatives // (3 * len(look_alikes)))
     negatives += [(t, 1.0) for t in COMMANDS] * max(1, args.negatives // (6 * len(COMMANDS)))
     negatives += [(t, 1.0) for t in _sentences(rng, max(0, args.negatives - len(negatives)))]
     rng.shuffle(negatives)
@@ -495,8 +518,8 @@ def cmd_test(args) -> int:
 
 def main(argv: Iterable[str] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--name", default="hi_sounder")
-    parser.add_argument("--phrase", default="Hi Sounder")
+    parser.add_argument("--name", default="hey_nova")
+    parser.add_argument("--phrase", default="Hey Nova")
     sub = parser.add_subparsers(dest="cmd", required=True)
     rec = sub.add_parser("record", help="record your own samples from the mic")
     rec.add_argument("--count", type=int, default=15)

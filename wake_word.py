@@ -9,7 +9,7 @@ is not needed:
 
 Each 80 ms step costs a few milliseconds on one CPU core.
 Any openWakeWord-compatible .onnx model works, and so does a .npz head
-trained locally by train_wake_word.py (the default "Hi Sounder" model).
+trained locally by train_wake_word.py (the default "Hey Nova" model).
 """
 
 from __future__ import annotations

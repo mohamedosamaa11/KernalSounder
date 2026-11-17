@@ -4,7 +4,7 @@ KernalSounder
 =============
 Hands-free voice layer over Linux and Windows.
 
-    "Hi Sounder" ──► wake word (locally trained head on openWakeWord features,
+    "Hey Nova" ──► wake word (locally trained head on openWakeWord features,
                      always on, ~6 ms per 80 ms) + Whisper double-check
          │
          ▼
@@ -191,7 +191,7 @@ class KernelSounder:
     def _run_personalize(self, session, progress) -> dict:
         from personalize import personalize, save_samples
 
-        name = Path(WAKE_MODEL).stem
+        name = self._wake_base_name()
         save_samples(name, session.clips, session.background, session.others)
         report = personalize(name, self.args.wake_phrase, session.clips, session.background,
                              stt=self.stt, progress=progress, extra_negatives=session.others)
@@ -202,7 +202,7 @@ class KernelSounder:
         from personalize import aliases_path, personal_model_path
         from wake_word import WakeWordDetector
 
-        name = Path(WAKE_MODEL).stem
+        name = self._wake_base_name()
         if not use:
             personal_model_path(name).unlink(missing_ok=True)
             aliases_path(name).unlink(missing_ok=True)
@@ -384,10 +384,13 @@ class KernelSounder:
         if self.args.wake_model == WAKE_MODEL:
             from personalize import personal_model_path
 
-            personal = personal_model_path(Path(WAKE_MODEL).stem)
+            personal = personal_model_path(self._wake_base_name())
             if personal.is_file():
                 return str(personal)
         return self.args.wake_model
+
+    def _wake_base_name(self) -> str:
+        return Path(self.args.wake_model).stem.replace("_personal", "")
 
     def _threshold_choice(self):
         if self.args.threshold is not None:
@@ -397,7 +400,7 @@ class KernelSounder:
     def _load_wake_aliases(self) -> list:
         from personalize import load_aliases
 
-        return load_aliases(Path(self.args.wake_model).stem.replace("_personal", ""))
+        return load_aliases(self._wake_base_name())
 
     def _save_hard_negative(self, audio) -> None:
         try:

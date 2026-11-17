@@ -1,6 +1,6 @@
 # KernalSounder
 
-Hands-free voice layer for **Linux and Windows**. Say **"Hi Sounder"**, a
+Hands-free voice layer for **Linux and Windows**. Say **"Hey Nova"**, a
 small floating bar slides up, you say a command, and the app maps it to a
 **structured intent**, validates it, and runs a fixed, pre-defined action.
 Raw voice text is never sent to a shell. There is no shell at all.
@@ -12,7 +12,7 @@ offline on the CPU.
 
 | | v1 | v2 |
 | --- | --- | --- |
-| Start listening | click **Listen** every time | say **"Hi Sounder"** (always-on wake word) |
+| Start listening | click **Listen** every time | say **"Hey Nova"** (always-on wake word) |
 | Speech-to-text | Google cloud, needs internet, ~1 s mic calibration each time | **offline** faster-whisper `tiny.en`, vocabulary-biased |
 | End of command | fixed 7 s phrase limit | WebRTC VAD stops ~0.75 s after you stop talking |
 | UI | full window | floating overlay pill; dashboard is optional |
@@ -25,7 +25,7 @@ offline on the CPU.
 ```
  mic (16 kHz, one stream, never re-opened)
    │
-   ├─► wake word  "Hi Sounder"         openWakeWord features + local MLP head, ~6 ms / 80 ms
+   ├─► wake word  "Hey Nova"           openWakeWord features + local MLP head, ~6 ms / 80 ms
    │        └─► Whisper double-check   only when the wake model fires (~0.4 s)
    ▼
  floating overlay opens ─► record until silence (WebRTC VAD)
@@ -38,7 +38,8 @@ offline on the CPU.
             ──► NEEDS_CONFIRM      → "Delete x?" → listens for confirm / cancel
             ──► SAFE action        → executor (Python file APIs / whitelisted app launch)
    ▼
- voice reply (pyttsx3: eSpeak on Linux, SAPI on Windows) + overlay result
+ voice reply (Windows SAPI with the clearer OneCore voices / Linux espeak-ng + MBROLA,
+             one sentence at a time, no extra RAM) + overlay result
 ```
 
 ## Footprint (measured on a laptop, Windows 11, Python 3.12)
@@ -109,7 +110,7 @@ bias the recognizer, and near misses snap to your spelling ("Mohammed" →
 ```bash
 chmod +x setup.sh run.sh
 ./setup.sh
-./run.sh                 # say "Hi Sounder"
+./run.sh                 # say "Hey Nova"
 ./run.sh --dashboard     # also open the full console
 ```
 
@@ -144,17 +145,25 @@ python kernal_sounder.py --install-autostart      # --remove-autostart to undo
 | `--stt google` | old cloud recognizer (needs internet) |
 | `--mic 3`, `--list-mics` | choose the input device |
 | `--mute` | no spoken replies |
+| `KS_VOICE=Mark` | reply voice. Windows: Zira (default) / Mark / David, newer OneCore voices first. Linux: `mb-us1` (MBROLA, default) or any espeak voice |
 
 Right-click the pill for **Talk now / Open dashboard / Quit**. Drag it anywhere.
 
-## The "Hi Sounder" wake word
+## The "Hey Nova" wake word
 
-`models/custom/hi_sounder.npz` was trained locally with
+Why "Nova": it was picked by measuring how consistently Whisper spells
+candidate words (two voices x three speeds). "Nova", "Jarvis", "Jasper",
+"Luna" were spelled right 6/6; "Hi Sounder" became "sound there"/"someone"
+with real voices, "Kernel" became "Colonel" 6/6. The earlier
+`hi_sounder.npz` model is still included:
+`--wake-model hi_sounder.npz --wake-phrase "Hi Sounder"`.
+
+`models/custom/hey_nova.npz` was trained locally with
 `train_wake_word.py`:
 
 1. Piper TTS (`en_US-libritts_r`, 904 speakers) synthesizes thousands of
-   "Hi Sounder" clips plus negatives: normal sentences, commands, and
-   sound-alikes ("hi sandra", "hi thunder", "hi founder" …).
+   "Hey Nova" clips plus negatives: normal sentences, commands, and
+   sound-alikes ("hey nora", "hey noah", "hey now", "hey rover" …).
 2. Clips get random speed, gain, noise and padding.
 3. Every clip goes through openWakeWord's frozen feature models
    (melspectrogram → speech embedding), the same ones the app runs.
@@ -162,20 +171,21 @@ Right-click the pill for **Talk now / Open dashboard / Quit**. Drag it anywhere.
 
 At runtime a trigger must first contain at least 0.45 s of real speech
 (WebRTC VAD, nearly free), then it is double-checked by Whisper (without a
-vocabulary prompt, so "hi founder" is not "corrected" into "hi sounder").
+vocabulary prompt, so a look-alike is not "corrected" into the wake word).
+Short keywords like "nova" need a closer match (85 %) so "nora" is rejected.
 
 ### Train my voice (in the app, ~2 minutes)
 
 Dashboard → **Train my voice**, or right-click the pill → **Train my voice…**
 
-1. Say "Hi Sounder" 10 times.
+1. Say "Hey Nova" 10 times.
 2. Read 5 short ordinary sentences (your voice saying something else).
 3. Stay quiet 15 s so it hears your room (TV/fan is fine).
 
 Then, in ~30 s of CPU and no extra packages:
 
 - **Learns how the recognizer hears you.** If Whisper writes your
-  "Hi Sounder" as "hi someone", that word is accepted by the second-stage
+  wake phrase as something else (e.g. "hey noah"), that word is accepted by the second-stage
   check from now on. This alone fixes most "it ignores me" cases.
 - **Fine-tunes the wake model** on your recordings (augmented ~10x), with
   negatives in your own voice (your sentences plus reversed/cut versions of
@@ -187,12 +197,12 @@ Then, in ~30 s of CPU and no extra packages:
   Otherwise the original model stays. "Keep the original" undoes everything.
 
 The app switches to the new model immediately, no restart. Your recordings
-stay in `models/custom/hi_sounder_samples/` (git-ignored).
+stay in `models/custom/hey_nova_samples/` (git-ignored).
 
 Same thing from a terminal (useful on a server or over SSH):
 
 ```bash
-python train_wake_word.py record --count 10            # say "Hi Sounder" 10 times
+python train_wake_word.py record --count 10            # say "Hey Nova" 10 times
 python train_wake_word.py record --negative --seconds 15
 python train_wake_word.py personalize                  # ~30 s
 python train_wake_word.py test                         # live score meter

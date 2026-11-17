@@ -27,6 +27,8 @@ class ParseCommandTests(unittest.TestCase):
         self.check("Jarvis list files", Intent.LIST_FILES)
         self.check("High sounder. Open the browser.", Intent.OPEN_APP, app="browser")
         self.check("Hi Sounder, list files", Intent.LIST_FILES)
+        self.check("Hey Nova, open the browser.", Intent.OPEN_APP, app="browser")
+        self.check("Hey, Nova. List files.", Intent.LIST_FILES)
 
     def test_fuzzy_repair(self):
         self.check("crate a file called demo.txt", Intent.CREATE_FILE, name="demo.txt")
