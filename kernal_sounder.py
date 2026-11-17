@@ -21,6 +21,8 @@ Nothing needs a click: the wake word opens the overlay, silence closes it.
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401  (must run before numpy / whisper load)
+
 import argparse
 import logging
 import sys

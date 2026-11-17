@@ -22,6 +22,8 @@ Usage
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401
+
 import argparse
 import json
 import random

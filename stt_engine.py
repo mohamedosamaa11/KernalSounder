@@ -12,6 +12,8 @@ Both receive the same 16 kHz int16 audio from audio.MicStream.
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401
+
 import difflib
 import re
 import threading
@@ -46,6 +48,23 @@ def _looks_like_prompt_echo(text: str, prompt: str = STT_VOCAB_PROMPT) -> bool:
     joined = " ".join(words)
     prompt_words = " ".join(re.sub(r"[^a-z ]", " ", prompt.lower()).split())
     return joined in prompt_words or joined in " ".join(_PROMPT_WORDS)
+
+
+def _skip_pyav() -> None:
+    """faster-whisper imports PyAV (FFmpeg) only to decode audio files; we pass raw
+    arrays, so a placeholder module saves ~10 MB of RAM. Real PyAV wins if loaded."""
+    import sys
+    import types
+
+    if "av" in sys.modules:
+        return
+    placeholder = types.ModuleType("av")
+
+    def __getattr__(name):
+        raise ImportError("PyAV is not loaded; KernalSounder only transcribes raw audio arrays.")
+
+    placeholder.__getattr__ = __getattr__
+    sys.modules["av"] = placeholder
 
 
 class STTEngine:
@@ -116,6 +135,7 @@ class STTEngine:
             return True
 
     def _load_whisper(self) -> None:
+        _skip_pyav()
         from faster_whisper import WhisperModel
 
         local = WHISPER_DIR / self.model_name

@@ -14,6 +14,8 @@ trained locally by train_wake_word.py (the default "Hi Sounder" model).
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401
+
 import json
 from pathlib import Path
 from typing import Optional
@@ -71,6 +73,8 @@ class WakeWordDetector:
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.log_severity_level = 3
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
         providers = ["CPUExecutionProvider"]
 
         def session(path: Path):

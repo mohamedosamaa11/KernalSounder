@@ -43,10 +43,24 @@ offline on the CPU.
 
 ## Footprint (measured on a laptop, Windows 11, Python 3.12)
 
-| Piece | RAM | CPU |
+Whole app, running with the wake word on:
+
+| | RAM (private) | RAM (working set) | Idle CPU |
+| --- | --- | --- | --- |
+| v2.0 | 1,424 MB | 260 MB | ~26 % of one core |
+| **now** | **~190 MB** | **~200 MB** | **~2–3 %** in a quiet room |
+
+What made the difference (`lean_runtime.py`, applied before any library loads):
+numpy's OpenBLAS limited to one thread (it reserved ~480 MB for 16 threads),
+CTranslate2's Intel MKL backend switched off (`CT2_USE_MKL=0`, ~650 MB less,
+same transcripts, slightly faster), OpenMP threads told to sleep instead of
+spin-waiting, onnxruntime's memory arena disabled, and PyAV (FFmpeg) never
+loaded because only raw audio is transcribed.
+
+| Piece | Working set | CPU |
 | --- | --- | --- |
-| Wake word (3 small models) | ~20 MB | ~6 ms per 80 ms of audio (one core ≈ 8%) |
-| Whisper tiny.en int8 | ~120 MB | 0.45 s per command with 4 threads, ~1.3 s with 2 |
+| Wake word (3 small ONNX models + MLP head) | ~15 MB | ~1.6 ms per 80 ms of audio (~2 % of one core) |
+| Whisper tiny.en int8 | ~80 MB | 0.33 s per command with 4 threads, ~0.4 s with 2 (this laptop) |
 | Tk overlay | few MB | 0 when idle (animation runs only while open) |
 
 ## Commands
