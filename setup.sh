@@ -13,7 +13,7 @@ fi
 sudo apt-get update
 sudo apt-get install -y \
   python3 python3-pip python3-venv python3-tk \
-  libportaudio2 espeak-ng libespeak-ng1 \
+  libportaudio2 espeak-ng libespeak-ng1 mbrola mbrola-us1 \
   flac xdg-utils
 
 cd "${ROOT}"
@@ -29,6 +29,6 @@ chmod +x "${ROOT}/run.sh" || true
 
 echo
 echo "Setup complete."
-echo "  Start:              ./run.sh            (say \"Hi Sounder\")"
+echo "  Start:              ./run.sh            (say \"Hey Nova\")"
 echo "  Start with console: ./run.sh --dashboard"
 echo "  Start at login:     ./run.sh --install-autostart"

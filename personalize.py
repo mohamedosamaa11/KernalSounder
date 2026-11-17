@@ -1,7 +1,7 @@
 """
 KernalSounder — make the wake word fit YOUR voice in about a minute.
 
-No new synthetic data and no GPU: the shipped "Hi Sounder" head is
+No new synthetic data and no GPU: the shipped wake-word head ("Hey Nova") is
 fine-tuned on
   * ~12 recordings of you saying the phrase (each augmented ~10x),
   * ~15 s of your room's normal sound (TV, fan, people talking),
@@ -9,7 +9,7 @@ fine-tuned on
 while an L2-SP penalty keeps the weights close to the base model, so a few
 personal samples cannot make it forget everything else it learned.
 
-It also learns how Whisper hears YOUR "Hi Sounder" (e.g. "hi someone") and
+It also learns how Whisper hears YOUR wake phrase (e.g. "hey noah") and
 stores those words as aliases for the second-stage check.
 
 Used by the "Train my voice" wizard in the app and by
@@ -122,13 +122,14 @@ def _same_voice_negatives(clip: np.ndarray, k: int) -> List[np.ndarray]:
     return [o for o in out if len(o) > SAMPLE_RATE // 10]
 
 
-def replay_clips(phrase: str, exclude: Sequence[str] = ()) -> tuple:
+def replay_clips(phrase: str, exclude: Sequence[str] = (), name: str = "") -> tuple:
     """Look-alike negatives and phrase positives in the OS voices, cached per machine."""
     from os_tts import synthesize
-    from train_wake_word import COMMANDS, SOUNDALIKES
+    from train_wake_word import COMMANDS, soundalikes_for
 
     skip = {e.lower() for e in exclude}
-    negatives = [t for t in SOUNDALIKES + COMMANDS[:8] if t.lower() not in skip]
+    negatives = [t for t in soundalikes_for(name or re.sub(r"[^a-z0-9]+", "_", phrase.lower()))
+                 + COMMANDS[:8] if t.lower() not in skip]
     key = re.sub(r"[^a-z0-9]+", "_", (phrase + "_" + "_".join(sorted(skip))).lower())[:80]
     cache = custom_dir() / f"replay_{key}.npz"
     if cache.is_file():
@@ -206,7 +207,7 @@ def personalize(name: str, phrase: str, positives: Sequence[np.ndarray], backgro
 
     if replay:
         progress(0.40, "Reminding the model of look-alike phrases…")
-        rep_pos, rep_neg = replay_clips(phrase, replay_exclude)
+        rep_pos, rep_neg = replay_clips(phrase, replay_exclude, name)
         rep_val = rep_neg[::5]
         for clip in [c for i, c in enumerate(rep_neg) if i % 5 != 0]:
             seed_n += 1

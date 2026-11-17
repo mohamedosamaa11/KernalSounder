@@ -210,7 +210,8 @@ class STTEngine:
         for word in re.findall(r"[a-z]+", text.lower()):
             if word == keyword or word in aliases:
                 return True, text
-            if word[:1] == keyword[:1] and difflib.SequenceMatcher(None, word, keyword).ratio() >= 0.72:
+            cutoff = 0.72 if len(keyword) > 5 else 0.85
+            if word[:1] == keyword[:1] and difflib.SequenceMatcher(None, word, keyword).ratio() >= cutoff:
                 return True, text
         return False, text
 

@@ -9,6 +9,6 @@ pip install -r requirements.txt || exit /b 1
 python download_models.py || exit /b 1
 echo.
 echo Setup complete.
-echo   Start:              run.bat            (say "Hi Sounder")
+echo   Start:              run.bat            (say "Hey Nova")
 echo   Start with console: run_console.bat --dashboard
 echo   Start at login:     venv\Scripts\python kernal_sounder.py --install-autostart
