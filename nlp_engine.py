@@ -2,20 +2,27 @@
 KernalSounder — command understanding.
 
 Still no neural NLP: a filler stripper, verb rules, and a spoken-app dictionary
-keep RAM near zero while accepting conversational phrasing.
+keep RAM near zero while accepting conversational phrasing. A fuzzy matcher
+(stdlib difflib) repairs near-miss command words from the recognizer.
 """
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Dict, Optional, Tuple
 
-from config import SPOKEN_APP_MAP
+from config import SPOKEN_APP_MAP, WAKE_WORDS_TO_STRIP
 from security import Intent, ParsedCommand
 
-_WORD_DOT = re.compile(r"\b(dot|period)\b", re.IGNORECASE)
+_WORD_DOT = re.compile(r"\s*\b(dot|period)\b\s*", re.IGNORECASE)
+_SENTENCE_DOT = re.compile(r"\.(?=\s|$)")
 _MULTI_SPACE = re.compile(r"\s+")
 _NON_NAME = re.compile(r"[^A-Za-z0-9._\-]")
+_WAKE_PREFIX = re.compile(
+    r"^(?:(?:" + "|".join(re.escape(w) for w in sorted(WAKE_WORDS_TO_STRIP, key=len, reverse=True))
+    + r")\b[\s,.!]*)+"
+)
 
 _SPOKEN_REPLACEMENTS = (
     (" under score ", "_"),
@@ -23,6 +30,14 @@ _SPOKEN_REPLACEMENTS = (
     (" dash ", "-"),
     (" hyphen ", "-"),
     (" minus ", "-"),
+    (" fire fox ", " firefox "),
+    (" note pad ", " notepad "),
+    (" g edit ", " gedit "),
+    (" v l c ", " vlc "),
+    (" c p u ", " cpu "),
+    (" r a m ", " ram "),
+    (" work space ", " workspace "),
+    (" sub folder ", " folder "),
 )
 
 # Longest phrases first so "could you please" wins over "could you".
@@ -370,7 +385,7 @@ _APPS_QUERY_RE = re.compile(
 _APP_KEYS = tuple(sorted(SPOKEN_APP_MAP.keys(), key=len, reverse=True))
 
 FALLBACK_TEXT = (
-    "Command not recognized. You can ask me to list files, open firefox, "
+    "Command not recognized. You can ask me to list files, open the browser, "
     "or show cpu usage."
 )
 
@@ -383,12 +398,21 @@ HELP_TEXT = (
 )
 
 APPS_HELP_TEXT = (
-    "You can open a browser or internet for Firefox, "
-    "files or folder for the file manager, "
-    "terminal for the command line, "
-    "and videos or player for the video player. "
-    "Try saying open browser, open files, open terminal, or open videos."
+    "I can open the browser, Firefox, Chrome or Edge, "
+    "files for the file manager, terminal for the command line, "
+    "editor or notepad, the calculator, videos for the video player, "
+    "photos, and paint. Try saying open browser, open files, or open terminal."
 )
+
+# Words the fuzzy matcher may repair. File names are never in this list.
+_COMMAND_VOCAB = tuple(sorted({
+    "create", "make", "delete", "remove", "erase", "rename", "open", "launch",
+    "close", "quit", "list", "show", "display", "file", "files", "folder",
+    "folders", "directory", "processes", "process", "running", "usage", "memory",
+    "disk", "workspace", "called", "named", "name", "change", "confirm", "cancel", "help",
+    "applications", "available",
+}))
+_APP_VOCAB = tuple(k for k in SPOKEN_APP_MAP if " " not in k and len(k) >= 4)
 
 _LEFTOVER_INTENTS = {
     "files": Intent.LIST_FILES,
@@ -419,16 +443,41 @@ def _has_any(text: str, words: Tuple[str, ...]) -> bool:
 
 def normalize_speech(text: str) -> str:
     lowered = (text or "").strip().lower()
-    lowered = lowered.replace("'", "'")
+    lowered = lowered.replace("’", "'").replace("‘", "'")
     lowered = lowered.replace("what's", "what is").replace("whats", "what is")
     lowered = lowered.replace("i'd", "i would")
-    lowered = _WORD_DOT.sub(".", lowered)
+    lowered = re.sub(r"[?!,:;\"]+", " ", lowered)
+    lowered = _SENTENCE_DOT.sub(" ", lowered)
+    lowered = f" {_MULTI_SPACE.sub(' ', lowered)} "
     for src, dst in _SPOKEN_REPLACEMENTS:
         lowered = lowered.replace(src, dst)
-    lowered = re.sub(r"\s*\.\s*", ".", lowered)
-    lowered = re.sub(r"[?!,:;]+", " ", lowered)
+    lowered = _WORD_DOT.sub(".", lowered)
     lowered = _MULTI_SPACE.sub(" ", lowered).strip(" .,")
     return lowered
+
+
+def strip_wake_words(text: str) -> str:
+    """Drop a leading wake phrase the recognizer may have kept ("hey jarvis open …")."""
+    return _WAKE_PREFIX.sub("", text).strip()
+
+
+def fuzzy_fix(text: str) -> str:
+    """Repair near-miss command words ("crate file" -> "create file", "fierfox" -> "firefox").
+
+    Tokens that look like file names (contain a dot, digit, _ or -) are never touched,
+    and short tokens are left alone so names like "labs" stay intact.
+    """
+    fixed = []
+    in_name = False
+    for token in text.split():
+        if in_name or (len(token) < 4 or token in _COMMAND_VOCAB or token in SPOKEN_APP_MAP
+                       or re.search(r"[0-9._\-]", token)):
+            fixed.append(token)
+            in_name = in_name or token in {"called", "named", "to"}
+            continue
+        match = difflib.get_close_matches(token, _COMMAND_VOCAB + _APP_VOCAB, n=1, cutoff=0.85)
+        fixed.append(match[0] if match else token)
+    return " ".join(fixed)
 
 
 def strip_fillers(text: str) -> str:
@@ -482,7 +531,7 @@ def _score_intent(text: str) -> Tuple[Intent, float]:
         for phrase in phrases:
             if text == phrase:
                 return intent, 1.0
-            if phrase in text:
+            if re.search(rf"(?<![\w']){re.escape(phrase)}(?![\w'])", text):
                 score = min(0.97, 0.55 + len(phrase) / max(len(text), 1) * 0.5)
                 if score > best_score:
                     best, best_score = intent, score
@@ -550,16 +599,22 @@ def _fill_slots(intent: Intent, stripped: str) -> Dict[str, str]:
 
 
 def parse_command(raw_text: str) -> ParsedCommand:
-    original = normalize_speech(raw_text)
+    original = strip_wake_words(normalize_speech(raw_text))
     if not original:
         return ParsedCommand(intent=Intent.UNKNOWN, raw_text=raw_text, confidence=0.0)
 
+    original = fuzzy_fix(original)
     stripped = strip_fillers(original) or original
 
     # Confirm / cancel must win over leftover filler matches like "ok".
-    if stripped in {"confirm", "yes", "yeah", "yep", "ok", "okay", "sure", "do it", "proceed", "go ahead"}:
+    confirm_words = {"confirm", "confirmed", "yes", "yeah", "yep", "ok", "okay", "sure", "do it",
+                     "proceed", "go ahead", "delete it"}
+    cancel_words = {"cancel", "no", "nope", "abort", "never mind", "nevermind", "stop it",
+                    "negative", "don't"}
+    tokens = stripped.split()
+    if stripped in confirm_words or (tokens and tokens[0] in confirm_words and len(tokens) <= 3):
         return ParsedCommand(intent=Intent.CONFIRM, raw_text=raw_text, confidence=1.0)
-    if stripped in {"cancel", "no", "nope", "abort", "never mind", "nevermind", "stop it", "negative"}:
+    if stripped in cancel_words or (tokens and tokens[0] in cancel_words and len(tokens) <= 3):
         return ParsedCommand(intent=Intent.CANCEL, raw_text=raw_text, confidence=1.0)
 
     ruled = _rule_intent(stripped, original)

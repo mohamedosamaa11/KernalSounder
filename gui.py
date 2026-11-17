@@ -1,20 +1,31 @@
 """
 KernalSounder — Tkinter operator console.
 
-The Tk main thread only paints. Speech, NLP, subprocesses, and psutil sampling
-run on worker threads and publish events through a queue so the UI cannot freeze
-while the microphone is open.
+The Tk main thread only paints. Speech, NLP, execution and psutil sampling run
+on worker threads and publish events through a queue so the UI cannot freeze
+while the microphone is open. The same Tk root also hosts the floating overlay;
+the full dashboard window starts hidden unless --dashboard is passed.
 """
 
 from __future__ import annotations
 
+import logging
 import queue
 import sys
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Dict, Optional
 
-from config import APP_NAME, APP_VERSION, GUI_QUEUE_POLL_MS, MAX_LOG_WIDGET_LINES, WORKSPACE
+from config import (
+    APP_NAME,
+    APP_VERSION,
+    GUI_QUEUE_POLL_MS,
+    IS_LINUX,
+    MAX_LOG_WIDGET_LINES,
+    PLATFORM_LABEL,
+    WORKSPACE,
+)
+from overlay import VoiceOverlay
 from security import ValidationState
 
 BG = "#0d1117"
@@ -41,6 +52,20 @@ STATE_COLORS = {
 }
 
 
+def _enable_dpi_awareness() -> None:
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 def _ui_font() -> str:
     return "Segoe UI" if sys.platform.startswith("win") else "Ubuntu"
 
@@ -49,16 +74,25 @@ class KernelSounderGUI:
     def __init__(self, on_toggle_listen: Callable[[], None],
                  on_confirm: Callable[[], None],
                  on_cancel: Callable[[], None],
-                 on_typed: Callable[[str], None]) -> None:
+                 on_typed: Callable[[str], None],
+                 overlay_callbacks: Optional[Dict[str, Callable[[], None]]] = None,
+                 start_hidden: bool = False,
+                 hint: str = "Click to talk",
+                 show_idle_pill: bool = True) -> None:
         self.on_toggle_listen = on_toggle_listen
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
         self.on_typed = on_typed
 
+        _enable_dpi_awareness()
         self.root = tk.Tk()
+        try:
+            self._k = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
+        except tk.TclError:
+            self._k = 1.0
         self.root.title(f"{APP_NAME}  ·  Voice OS Layer")
-        self.root.geometry("1040x720")
-        self.root.minsize(900, 620)
+        self.root.geometry(f"{int(1040 * self._k)}x{int(720 * self._k)}")
+        self.root.minsize(int(900 * self._k), int(620 * self._k))
         self.root.configure(bg=BG)
 
         self._events: queue.Queue = queue.Queue()
@@ -67,7 +101,14 @@ class KernelSounderGUI:
 
         self._build_style()
         self._build_layout()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.overlay: Optional[VoiceOverlay] = None
+        if overlay_callbacks is not None:
+            self.overlay = VoiceOverlay(self.root, hint=hint, show_idle_pill=show_idle_pill,
+                                        **overlay_callbacks)
+        self.dashboard_visible = not start_hidden
+        if start_hidden:
+            self.root.withdraw()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_dashboard_close)
         self.root.after(GUI_QUEUE_POLL_MS, self._pump)
 
     def run(self) -> None:
@@ -82,9 +123,21 @@ class KernelSounderGUI:
     def emit(self, kind: str, **payload) -> None:
         self._events.put((kind, payload))
 
-    def _on_close(self) -> None:
-        self._events.put(("shutdown", {}))
-        self.root.after(120, self.close)
+    def show_dashboard(self) -> None:
+        self.dashboard_visible = True
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def quit(self) -> None:
+        self.root.after(80, self.close)
+
+    def _on_dashboard_close(self) -> None:
+        if self.overlay is not None:
+            self.dashboard_visible = False
+            self.root.withdraw()
+            return
+        self.quit()
 
     def _pump(self) -> None:
         for _ in range(48):
@@ -94,7 +147,12 @@ class KernelSounderGUI:
                 break
             handler = self._handlers.get(kind)
             if handler:
-                handler(**payload)
+                try:
+                    handler(**payload)
+                except tk.TclError:
+                    return
+                except Exception:
+                    logging.exception("UI handler %s failed", kind)
         try:
             self.root.after(GUI_QUEUE_POLL_MS, self._pump)
         except tk.TclError:
@@ -143,7 +201,7 @@ class KernelSounderGUI:
         titles.pack(side=tk.LEFT)
         tk.Label(titles, text=APP_NAME.upper(), bg=BG, fg=TEXT,
                  font=(font, 20, "bold")).pack(anchor="w")
-        tk.Label(titles, text=f"Voice interaction layer  ·  v{APP_VERSION}  ·  Ubuntu sandbox",
+        tk.Label(titles, text=f"Voice interaction layer  ·  v{APP_VERSION}  ·  {PLATFORM_LABEL.title()} sandbox",
                  bg=BG, fg=MUTED, font=(font, 9)).pack(anchor="w")
 
         self.mic_badge = tk.Label(
@@ -153,8 +211,8 @@ class KernelSounderGUI:
         self.mic_badge.pack(side=tk.RIGHT, padx=(8, 0))
 
         self.os_badge = tk.Label(
-            header, text="  LINUX  " if sys.platform.startswith("linux") else "  NOT LINUX  ",
-            bg=PANEL_ALT, fg=SUCCESS if sys.platform.startswith("linux") else WARN,
+            header, text=f"  {PLATFORM_LABEL}  ",
+            bg=PANEL_ALT, fg=SUCCESS if IS_LINUX or PLATFORM_LABEL == "WINDOWS" else WARN,
             font=(font, 9, "bold"), padx=10, pady=6,
         )
         self.os_badge.pack(side=tk.RIGHT)
@@ -189,7 +247,7 @@ class KernelSounderGUI:
 
         self._section_title(left, "RECOGNIZED SPEECH")
         self.heard_var = tk.StringVar(value="Waiting for microphone or typed input…")
-        tk.Label(left, textvariable=self.heard_var, bg=PANEL, fg=TEXT, wraplength=440,
+        tk.Label(left, textvariable=self.heard_var, bg=PANEL, fg=TEXT, wraplength=int(440 * self._k),
                  justify="left", font=(font, 13, "bold"), anchor="w").pack(
             fill=tk.X, padx=14, pady=(4, 10)
         )
@@ -205,8 +263,8 @@ class KernelSounderGUI:
                  font=(font, 10)).pack(side=tk.RIGHT)
 
         self._section_title(left, "PIPELINE STATUS")
-        self.status_var = tk.StringVar(value="Idle. Press Listen or type a command.")
-        tk.Label(left, textvariable=self.status_var, bg=PANEL, fg=TEXT, wraplength=440,
+        self.status_var = tk.StringVar(value="Idle. Say the wake word, press Talk, or type a command.")
+        tk.Label(left, textvariable=self.status_var, bg=PANEL, fg=TEXT, wraplength=int(440 * self._k),
                  justify="left", anchor="w").pack(fill=tk.X, padx=14, pady=(0, 14))
 
         self._section_title(right, "VALIDATION STATE")
@@ -218,20 +276,20 @@ class KernelSounderGUI:
         self.valid_badge.pack(anchor="w", padx=14, pady=(4, 8))
 
         self.reason_var = tk.StringVar(value="No command has been validated yet.")
-        tk.Label(right, textvariable=self.reason_var, bg=PANEL, fg=TEXT, wraplength=440,
+        tk.Label(right, textvariable=self.reason_var, bg=PANEL, fg=TEXT, wraplength=int(440 * self._k),
                  justify="left", anchor="w").pack(fill=tk.X, padx=14, pady=(0, 10))
 
-        self._section_title(right, "VALIDATED ARGV  (never raw voice)")
+        self._section_title(right, "VALIDATED ACTION  (never raw voice)")
         self.argv_box = tk.Text(
             right, height=4, bg=INPUT_BG, fg=SUCCESS, insertbackground=TEXT,
             relief=tk.FLAT, wrap=tk.WORD, font=("Ubuntu Mono" if not sys.platform.startswith("win") else "Consolas", 10),
         )
         self.argv_box.pack(fill=tk.X, padx=14, pady=(0, 8))
-        self.argv_box.insert("1.0", "(no argv)")
+        self.argv_box.insert("1.0", "(no action)")
         self.argv_box.configure(state=tk.DISABLED)
 
         self.ws_var = tk.StringVar(value=f"Workspace: {WORKSPACE}")
-        tk.Label(right, textvariable=self.ws_var, bg=PANEL, fg=MUTED, wraplength=440,
+        tk.Label(right, textvariable=self.ws_var, bg=PANEL, fg=MUTED, wraplength=int(440 * self._k),
                  justify="left", anchor="w", font=(font, 8)).pack(
             fill=tk.X, padx=14, pady=(0, 12)
         )
@@ -254,7 +312,7 @@ class KernelSounderGUI:
         controls = tk.Frame(pad, bg=BG)
         controls.pack(fill=tk.X)
 
-        self.listen_btn = self._button(controls, "Listen", self.on_toggle_listen, ACCENT)
+        self.listen_btn = self._button(controls, "Talk", self.on_toggle_listen, ACCENT)
         self.listen_btn.pack(side=tk.LEFT)
         self.confirm_btn = self._button(controls, "Confirm Delete", self.on_confirm, SUCCESS)
         self.confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
@@ -269,7 +327,7 @@ class KernelSounderGUI:
         )
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, ipady=8)
         self.entry.bind("<Return>", self._submit_typed)
-        self.entry.insert(0, "Type a command if the VM has no microphone…")
+        self.entry.insert(0, "Type a command…")
         self.entry.bind("<FocusIn>", self._clear_placeholder)
 
         go = self._button(controls, "Execute", lambda: self._submit_typed(None), ACCENT)
@@ -286,6 +344,11 @@ class KernelSounderGUI:
             "log": self._on_log,
             "confirm_ready": self._on_confirm_ready,
             "error": self._on_error,
+            "overlay": self._on_overlay,
+            "level": self._on_level,
+            "hint": self._on_hint,
+            "show_dashboard": lambda: self.show_dashboard(),
+            "quit": lambda: self.quit(),
         }
 
     def _meter_row(self, parent: tk.Frame, col: int, label: tk.StringVar,
@@ -339,7 +402,7 @@ class KernelSounderGUI:
             self.listen_btn.configure(text="Stop")
         else:
             self.mic_badge.configure(text="  MIC IDLE  ", fg=MUTED)
-            self.listen_btn.configure(text="Listen")
+            self.listen_btn.configure(text="Talk")
 
     def _on_partial(self, text: str) -> None:
         if text:
@@ -353,14 +416,14 @@ class KernelSounderGUI:
         extra = f"  ·  {slots}" if slots else ""
         self.conf_var.set(f"{confidence * 100:.0f}%{extra}")
 
-    def _on_validation(self, state: str, reason: str, argv: str) -> None:
+    def _on_validation(self, state: str, reason: str, action: str) -> None:
         self.valid_var.set(state)
         color = STATE_COLORS.get(state, MUTED)
         self.valid_badge.configure(fg=color)
         self.reason_var.set(reason)
         self.argv_box.configure(state=tk.NORMAL)
         self.argv_box.delete("1.0", tk.END)
-        self.argv_box.insert("1.0", argv or "(no argv — raw voice is never executed)")
+        self.argv_box.insert("1.0", action or "(no action — raw voice is never executed)")
         self.argv_box.configure(state=tk.DISABLED)
         self._set_confirm_enabled(state == ValidationState.NEEDS_CONFIRM.value)
 
@@ -383,3 +446,15 @@ class KernelSounderGUI:
     def _on_error(self, text: str) -> None:
         self.status_var.set(text)
         self._on_log(text, "bad")
+
+    def _on_overlay(self, phase: str, text: str = "", tone: str = "info") -> None:
+        if self.overlay is not None:
+            self.overlay.set_phase(phase, text, tone)
+
+    def _on_level(self, value: float) -> None:
+        if self.overlay is not None:
+            self.overlay.set_level(value)
+
+    def _on_hint(self, text: str) -> None:
+        if self.overlay is not None:
+            self.overlay.set_hint(text)

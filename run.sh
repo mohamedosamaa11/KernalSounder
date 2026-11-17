@@ -8,4 +8,4 @@ if [[ -f "${ROOT}/venv/bin/activate" ]]; then
   source "${ROOT}/venv/bin/activate"
 fi
 
-exec python3 "${ROOT}/kernal_sounder.py"
+exec python3 "${ROOT}/kernal_sounder.py" "$@"
