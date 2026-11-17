@@ -21,12 +21,16 @@ Nothing needs a click: the wake word opens the overlay, silence closes it.
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401  (must run before numpy / whisper load)
+
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Optional, Tuple
 
 import psutil
@@ -56,7 +60,7 @@ from audio import CommandRecorder, MicStream, play_earcon, rms_level
 from config import CHUNK_SAMPLES, MODELS_DIR, SAMPLE_RATE
 from executor import ExecutionResult, execute
 from gui import KernelSounderGUI
-from nlp_engine import FALLBACK_TEXT, parse_command
+from nlp_engine import FALLBACK_TEXT, answer_to_slot, missing_slot, parse_command
 from security import (
     Intent,
     ParsedCommand,
@@ -89,10 +93,13 @@ class KernelSounder:
         self._stop = threading.Event()
         self._busy = threading.Lock()
         self._pending: Optional[PendingDelete] = None
+        self._awaiting: Optional[dict] = None
         self._pending_at = 0.0
         self._state = "idle"
         self._capture_reason = ""
         self._manual = threading.Event()
+        self._enroll = None
+        self._wizard = None
         self._finish_now = threading.Event()
         self._abort = threading.Event()
         self._abort_quiet = False
@@ -100,7 +107,10 @@ class KernelSounder:
         self._wake_dirty = False
         self.mic: Optional[MicStream] = None
         self.wake = None
+        self.wake_aliases: list = []
         self.recorder = CommandRecorder()
+        self.speech_gate = CommandRecorder(aggressiveness=3)
+        self.gate_rejects = 0
         self.wake_enabled = WAKE_ENABLED and not args.no_wake
 
         hint = f"Say “{args.wake_phrase}”" if self.wake_enabled else "Click to talk"
@@ -117,7 +127,9 @@ class KernelSounder:
                 on_cancel=self.cancel_from_ui,
                 on_dashboard=self.gui_show_dashboard,
                 on_quit=self.quit,
+                on_train=self.open_trainer,
             ),
+            on_train=self.open_trainer,
             start_hidden=not args.dashboard,
             hint=hint if self.wake_enabled else "Click to talk",
             show_idle_pill=not args.no_pill and SHOW_IDLE_PILL,
@@ -139,6 +151,68 @@ class KernelSounder:
 
     def _ui(self, phase: str, text: str = "", tone: str = "info") -> None:
         self.gui.emit("overlay", phase=phase, text=text, tone=tone)
+
+    def open_trainer(self) -> None:
+        """Runs on the Tk thread (dashboard button / pill menu)."""
+        from trainer_ui import TrainerWizard
+
+        if self._wizard is not None:
+            try:
+                self._wizard.win.lift()
+                return
+            except Exception:
+                self._wizard = None
+        self._wizard = TrainerWizard(
+            self.gui.root,
+            phrase=self.args.wake_phrase,
+            begin=self._begin_enroll,
+            end=self._end_enroll,
+            train=self._run_personalize,
+            apply=self._apply_personal,
+        )
+        self._wizard.win.bind("<Destroy>", lambda e: setattr(self, "_wizard", None)
+                              if e.widget is self._wizard.win else None)
+
+    def _begin_enroll(self, session) -> bool:
+        if self.mic is None:
+            return False
+        self._quiet_abort()
+        self._enroll = session
+        self._ui("idle")
+        self.gui.emit("hint", text="Training\u2026")
+        return True
+
+    def _end_enroll(self) -> None:
+        self._enroll = None
+        self._wake_dirty = True
+        hint = f"Say \u201c{self.args.wake_phrase}\u201d" if self.wake is not None else "Click to talk"
+        self.gui.emit("hint", text=hint)
+
+    def _run_personalize(self, session, progress) -> dict:
+        from personalize import personalize, save_samples
+
+        name = Path(WAKE_MODEL).stem
+        save_samples(name, session.clips, session.background, session.others)
+        report = personalize(name, self.args.wake_phrase, session.clips, session.background,
+                             stt=self.stt, progress=progress, extra_negatives=session.others)
+        logging.info("Personalization: %s", report)
+        return report
+
+    def _apply_personal(self, use: bool) -> None:
+        from personalize import aliases_path, personal_model_path
+        from wake_word import WakeWordDetector
+
+        name = Path(WAKE_MODEL).stem
+        if not use:
+            personal_model_path(name).unlink(missing_ok=True)
+            aliases_path(name).unlink(missing_ok=True)
+        try:
+            self.wake = WakeWordDetector(self._wake_model_choice(), threshold=self._threshold_choice())
+            self.wake_aliases = self._load_wake_aliases()
+            self._log(f"Wake word now: {self.wake.name} (threshold {self.wake.threshold:.2f}, "
+                      f"aliases {self.wake_aliases or 'none'})", "ok")
+        except Exception as exc:
+            self._log(f"Could not reload the wake word: {exc}", "bad")
 
     def gui_show_dashboard(self) -> None:
         self.gui.emit("show_dashboard")
@@ -165,14 +239,28 @@ class KernelSounder:
             try:
                 from wake_word import WakeWordDetector
 
-                self.wake = WakeWordDetector(self.args.wake_model, threshold=self.args.threshold)
+                self.wake = WakeWordDetector(self._wake_model_choice(), threshold=self._threshold_choice())
+                self.wake_aliases = self._load_wake_aliases()
                 self._log(f"Wake word ready: {self.wake.name} (threshold {self.wake.threshold:.2f})", "ok")
             except Exception as exc:
                 self.wake = None
                 self._log(f"Wake word unavailable: {exc}", "warn")
                 self.gui.emit("hint", text="Click to talk")
+        try:
+            from app_catalog import CATALOG
+
+            count = CATALOG.refresh()
+            self._log(f"Found {count} installed apps.", "info")
+        except Exception as exc:
+            self._log(f"App catalog unavailable: {exc}", "warn")
         started = time.monotonic()
         if self.stt.load():
+            try:
+                from app_catalog import CATALOG
+
+                self.stt.set_app_names(CATALOG.allowed_names())
+            except Exception:
+                pass
             self._log(f"Speech recognition ready: {self.stt.describe()} "
                       f"({time.monotonic() - started:.1f}s)", "ok")
             self.gui.emit("status", text="Ready. Say the wake word or press Talk.")
@@ -232,12 +320,18 @@ class KernelSounder:
             return
 
         last_wake = 0.0
-        recent: deque = deque(maxlen=max(1, int(WAKE_VERIFY_SEC * SAMPLE_RATE / CHUNK_SAMPLES)))
+        window = max(1, int(WAKE_VERIFY_SEC * SAMPLE_RATE / CHUNK_SAMPLES))
+        recent: deque = deque(maxlen=window)
+        voiced: deque = deque(maxlen=window)
         while not self._stop.is_set():
             chunk = self.mic.read(timeout=0.5)
             if chunk is None:
                 continue
             recent.append(chunk)
+            enroll = self._enroll
+            if enroll is not None:
+                enroll.feed(chunk)
+                continue
             if self._state == "capture":
                 self._capture_step(chunk)
                 continue
@@ -248,7 +342,7 @@ class KernelSounder:
                 continue
             if self._followup_after_tts:
                 self._followup_after_tts = False
-                if self._pending is not None:
+                if self._pending is not None or self._awaiting is not None:
                     self._begin_capture("followup")
                     continue
             if self._manual.is_set():
@@ -262,12 +356,19 @@ class KernelSounder:
                 wake.reset()
                 self._wake_dirty = False
             score = wake.process(chunk)
+            voiced.append(self.speech_gate.is_voiced(chunk))
             now = time.monotonic()
             if score >= wake.threshold and now - last_wake > WAKE_COOLDOWN_SEC:
                 last_wake = now
                 wake.reset()
+                speech_sec = sum(voiced) * CHUNK_SAMPLES / SAMPLE_RATE
+                if speech_sec < 0.45:
+                    self.gate_rejects += 1
+                    logging.debug("Wake %.3f ignored: only %.2fs of speech", score, speech_sec)
+                    continue
                 if self.args.verify:
-                    ok, heard = self.stt.verify_keyword(np.concatenate(list(recent)), self.args.wake_phrase)
+                    ok, heard = self.stt.verify_keyword(np.concatenate(list(recent)), self.args.wake_phrase,
+                                                        tuple(self.wake_aliases))
                     if ok is False:
                         logging.info("Wake %.3f rejected by verifier: %r", score, heard)
                         if self.args.collect_negatives:
@@ -277,6 +378,26 @@ class KernelSounder:
                 else:
                     logging.info("Wake word %.3f", score)
                 self._begin_capture("wake")
+
+    def _wake_model_choice(self) -> str:
+        """The personal model from 'Train my voice' wins over the default one."""
+        if self.args.wake_model == WAKE_MODEL:
+            from personalize import personal_model_path
+
+            personal = personal_model_path(Path(WAKE_MODEL).stem)
+            if personal.is_file():
+                return str(personal)
+        return self.args.wake_model
+
+    def _threshold_choice(self):
+        if self.args.threshold is not None:
+            return self.args.threshold
+        return WAKE_THRESHOLD if os.environ.get("KS_WAKE_THRESHOLD") else None
+
+    def _load_wake_aliases(self) -> list:
+        from personalize import load_aliases
+
+        return load_aliases(Path(self.args.wake_model).stem.replace("_personal", ""))
 
     def _save_hard_negative(self, audio) -> None:
         try:
@@ -302,6 +423,8 @@ class KernelSounder:
         if reason == "followup" and self._pending is not None:
             target = self._pending[1].resolved_path.name if self._pending[1].resolved_path else "it"
             self._ui("confirm", f"Delete {target}?  Say confirm or cancel.", "warn")
+        elif reason == "followup" and self._awaiting is not None:
+            self._ui("listening", self._awaiting["question"], "info")
         else:
             self._ui("listening", "Listening…", "muted")
 
@@ -316,6 +439,7 @@ class KernelSounder:
                 if reason == "followup" and self._pending is not None:
                     self.submit_text("cancel", source="gui")
                 else:
+                    self._awaiting = None
                     self._ui("idle")
             self._abort_quiet = False
             return
@@ -338,6 +462,9 @@ class KernelSounder:
             if reason == "followup" and self._pending is not None:
                 self._clear_pending("No answer, so the delete was cancelled.")
                 self.tts.speak("Delete cancelled.")
+            elif reason == "followup" and self._awaiting is not None:
+                self._awaiting = None
+                self._ui("result", "No answer, so I left it.", "muted")
             else:
                 self._ui("result", "I didn't hear a command.", "muted")
 
@@ -368,6 +495,7 @@ class KernelSounder:
                 self.tts.speak("Please say confirm or cancel.")
                 self._followup_after_tts = True
             else:
+                self._awaiting = None
                 self._ui("result", "Sorry, I didn't catch that.", "muted")
             return
         self._handle_text(text, source="voice")
@@ -418,9 +546,52 @@ class KernelSounder:
                 self._followup_after_tts = True
             return
 
+        if self._awaiting is not None and source != "gui":
+            awaiting, self._awaiting = self._awaiting, None
+            fresh = time.monotonic() - awaiting["at"] <= CONFIRM_TIMEOUT_SEC
+            standalone = (parsed.intent not in (Intent.UNKNOWN, Intent.CONFIRM, Intent.CANCEL)
+                          and parsed.confidence >= 0.85 and len(text.split()) >= 2
+                          and missing_slot(parsed) is None)
+            if fresh and parsed.intent == Intent.CANCEL:
+                self._ui("result", "Okay, cancelled.", "muted")
+                self.tts.speak("Okay, cancelled.")
+                return
+            if fresh and parsed.intent != Intent.DANGEROUS and not standalone:
+                value = answer_to_slot(awaiting["slot"], text)
+                if not value:
+                    self._ui("result", "Sorry, I didn't catch that.", "muted")
+                    return
+                parsed = ParsedCommand(intent=awaiting["intent"], slots={awaiting["slot"]: value},
+                                       raw_text=text, confidence=0.9)
+                self.gui.emit("intent", intent=parsed.intent.value, confidence=parsed.confidence,
+                              slots=f"{awaiting['slot']}={value}")
+                logging.info("Follow-up answer %r -> %s %s", text, parsed.intent.value, parsed.slots)
+
         if parsed.intent in (Intent.CONFIRM, Intent.CANCEL):
             self.gui.emit("validation", state="IDLE", reason="Nothing is waiting for confirmation.", action="")
             self._ui("result", "Nothing is waiting for confirmation.", "muted")
+            return
+
+        if parsed.intent == Intent.DANGEROUS:
+            reason = parsed.slots.get("reason", "That request is not allowed.")
+            self.gui.emit("validation", state=ValidationState.BLOCKED.value, reason=reason,
+                          action="(refused by the safety guard)")
+            self._log(f"SECURITY refused {text!r}: {reason}", "bad")
+            logging.warning("Security refusal: %r -> %s", text, reason)
+            self._ui("result", f"Refused: {reason}", "bad")
+            self.tts.speak(reason)
+            return
+
+        missing = missing_slot(parsed)
+        if missing is not None and parsed.intent != Intent.UNKNOWN:
+            slot, question = missing
+            self._awaiting = {"intent": parsed.intent, "slot": slot, "question": question,
+                              "at": time.monotonic()}
+            self.gui.emit("status", text=question)
+            self._ui("listening" if source == "voice" else "result", question, "info")
+            self.tts.speak(question)
+            if self.mic is not None and source == "voice":
+                self._followup_after_tts = True
             return
 
         if parsed.intent == Intent.UNKNOWN or parsed.confidence < 0.45:
@@ -520,7 +691,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--no-pill", action="store_true", help="hide the idle pill; overlay appears only on wake")
     parser.add_argument("--wake-model", default=WAKE_MODEL, help="openWakeWord .onnx model name or path")
     parser.add_argument("--wake-phrase", default=WAKE_PHRASE, help="phrase shown in the idle hint")
-    parser.add_argument("--threshold", type=float, default=WAKE_THRESHOLD, help="wake sensitivity 0..1")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="wake sensitivity 0..1 (default: the model's own, usually 0.5)")
     parser.add_argument("--no-verify", dest="verify", action="store_false", default=WAKE_VERIFY,
                         help="skip the whisper double-check of the wake word")
     parser.add_argument("--collect-negatives", action="store_true",

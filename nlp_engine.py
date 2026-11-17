@@ -13,6 +13,8 @@ import re
 from typing import Dict, Optional, Tuple
 
 from config import SPOKEN_APP_MAP, WAKE_WORDS_TO_STRIP
+from guard import danger_reason
+from vocabulary import snap_to_vocabulary
 from security import Intent, ParsedCommand
 
 _WORD_DOT = re.compile(r"\s*\b(dot|period)\b\s*", re.IGNORECASE)
@@ -340,14 +342,20 @@ INTENT_PHRASES: Dict[Intent, Tuple[str, ...]] = {
     ),
 }
 
+# Every way people introduce a name: "named X", "its name is X", "and call it X" ...
+_NAME_INTRO = (
+    r"(?:(?:and\s+)?(?:call|name)\s+it|(?:its|it's|it\s+is|the|whose|his|her|with\s+the|with)\s+name\s*(?:is|as|of)?|"
+    r"name\s+is|called|named|titled|name|as)"
+)
+_NAME_INTRO_RE = re.compile(rf"^(?:{_NAME_INTRO})\s+", re.IGNORECASE)
 _CREATE_FILE_RE = re.compile(
-    r"(?:create|make|new|touch)\s+(?:file|document)\s+"
-    r"(?:called|named|with name|with the name)?\s*(?P<name>.+)$",
+    r"(?:create|make|new|touch)\s+(?:new\s+)?(?:file|document)\s*"
+    rf"(?:{_NAME_INTRO})?\s*(?P<name>.*)$",
     re.IGNORECASE,
 )
 _CREATE_FOLDER_RE = re.compile(
-    r"(?:create|make|new)\s+(?:folder|directory|dir)\s+"
-    r"(?:called|named|with name|with the name)?\s*(?P<name>.+)$",
+    r"(?:create|make|new)\s+(?:new\s+)?(?:folder|directory|dir)\s*"
+    rf"(?:{_NAME_INTRO})?\s*(?P<name>.*)$",
     re.IGNORECASE,
 )
 _RENAME_RE = re.compile(
@@ -358,9 +366,10 @@ _RENAME_RE = re.compile(
 )
 _DELETE_RE = re.compile(
     r"(?:delete|remove|erase|unlink)\s+(?:file|folder|directory)?\s*"
-    r"(?:called|named)?\s*(?P<name>.+)$",
+    rf"(?:{_NAME_INTRO})?\s*(?P<name>.*)$",
     re.IGNORECASE,
 )
+_SPELLED_RE = re.compile(r"^(?:[a-z0-9][\s\-.,]+){2,}[a-z0-9]$", re.IGNORECASE)
 _OPEN_RE = re.compile(
     r"(?:open|launch|start|run|play|watch)\s+"
     r"(?:app|application|program|the)?\s*"
@@ -503,10 +512,38 @@ def match_spoken_app(text: str) -> Optional[str]:
 
 def _clean_name(value: str) -> str:
     token = (value or "").strip().strip("\"'")
+    token = _NAME_INTRO_RE.sub("", token)
+    if _SPELLED_RE.match(token):
+        token = re.sub(r"[\s\-.,]+", "", token)
     token = strip_fillers(token)
     token = token.replace(" ", "_")
     token = _NON_NAME.sub("", token)
     return token.strip("._-")
+
+
+def extract_name_answer(text: str) -> str:
+    """Turn a follow-up answer ("call it Mohamed", "Mohamed please") into a file name."""
+    cleaned = strip_wake_words(normalize_speech(text))
+    cleaned = re.sub(r"^(?:ok(?:ay)?|sure|yes|well|um+|uh+)\s+", "", cleaned)
+    cleaned = re.sub(r"^(?:let's\s+|let\s+us\s+)?(?:call|name)\s+it\s+|^make\s+it\s+", "", cleaned)
+    return snap_to_vocabulary(restore_case(_clean_name(cleaned), text))
+
+
+def restore_case(slot: str, raw_text: str) -> str:
+    """Give a lower-cased slot back the capitals the user/recognizer used ("mohamed" -> "Mohamed").
+
+    Only the parts before the extension are restored; "Notes.TXT" becomes "Notes.txt".
+    """
+    if not slot:
+        return slot
+    originals = {}
+    for word in re.findall(r"[A-Za-z0-9]+", raw_text or ""):
+        if any(c.isupper() for c in word):
+            originals.setdefault(word.lower(), word)
+    stem, dot, ext = slot.rpartition(".") if "." in slot else (slot, "", "")
+    parts = re.split(r"([_\-.])", stem)
+    restored = "".join(originals.get(p, p) for p in parts)
+    return f"{restored}{dot}{ext.lower()}" if dot else restored
 
 
 def _extract_app_slot(text: str) -> str:
@@ -519,9 +556,10 @@ def _extract_app_slot(text: str) -> str:
         " ",
         candidate,
     )
-    candidate = _MULTI_SPACE.sub(" ", candidate).strip()
-    alias = match_spoken_app(candidate) or match_spoken_app(text)
-    return alias or candidate
+    candidate = _MULTI_SPACE.sub(" ", candidate).strip(" .")
+    if candidate:
+        return candidate
+    return match_spoken_app(text) or ""
 
 
 def _score_intent(text: str) -> Tuple[Intent, float]:
@@ -598,6 +636,36 @@ def _fill_slots(intent: Intent, stripped: str) -> Dict[str, str]:
     return slots
 
 
+_BARE_APP_VERBS = frozenset({
+    "open", "launch", "start", "run", "close", "quit", "kill", "exit",
+    "open app", "open an app", "open application", "open program", "close app", "close an app",
+})
+
+_QUESTIONS = {
+    Intent.CREATE_FILE: ("name", "What should I call the file?"),
+    Intent.CREATE_FOLDER: ("name", "What should I call the folder?"),
+    Intent.DELETE_FILE: ("name", "Which file should I delete?"),
+    Intent.OPEN_APP: ("app", "Which app should I open?"),
+    Intent.CLOSE_APP: ("app", "Which app should I close?"),
+}
+
+
+def missing_slot(parsed: ParsedCommand) -> Optional[Tuple[str, str]]:
+    """(slot, question) when a recognized command lacks its target, else None."""
+    entry = _QUESTIONS.get(parsed.intent)
+    if entry and not parsed.slots.get(entry[0]):
+        return entry
+    return None
+
+
+def answer_to_slot(slot: str, text: str) -> str:
+    if slot == "name":
+        return extract_name_answer(text)
+    cleaned = strip_fillers(fuzzy_fix(strip_wake_words(normalize_speech(text))))
+    cleaned = re.sub(r"^(?:open|launch|start|close|quit)\s+", "", cleaned)
+    return cleaned.strip(" .")
+
+
 def parse_command(raw_text: str) -> ParsedCommand:
     original = strip_wake_words(normalize_speech(raw_text))
     if not original:
@@ -605,6 +673,11 @@ def parse_command(raw_text: str) -> ParsedCommand:
 
     original = fuzzy_fix(original)
     stripped = strip_fillers(original) or original
+
+    refusal = danger_reason(original)
+    if refusal:
+        return ParsedCommand(intent=Intent.DANGEROUS, slots={"reason": refusal},
+                             raw_text=raw_text, confidence=1.0)
 
     # Confirm / cancel must win over leftover filler matches like "ok".
     confirm_words = {"confirm", "confirmed", "yes", "yeah", "yep", "ok", "okay", "sure", "do it",
@@ -641,6 +714,12 @@ def parse_command(raw_text: str) -> ParsedCommand:
                 stripped = f"open {alias}"
 
     slots = _fill_slots(intent, stripped)
+    first_word = (raw_text or "").strip().split(" ")[0].lower() if raw_text else ""
+    for key in ("name", "source", "destination"):
+        if slots.get(key) and slots[key].split(".")[0].lower() != first_word:
+            slots[key] = restore_case(slots[key], raw_text)
+        if slots.get(key):
+            slots[key] = snap_to_vocabulary(slots[key])
 
     if intent in (Intent.CREATE_FILE, Intent.CREATE_FOLDER, Intent.DELETE_FILE):
         if not slots.get("name"):
@@ -654,7 +733,8 @@ def parse_command(raw_text: str) -> ParsedCommand:
             confidence = max(confidence, 0.88)
         else:
             confidence = min(confidence, 0.4)
-            intent = Intent.UNKNOWN
+            if stripped not in _BARE_APP_VERBS:
+                intent = Intent.UNKNOWN
 
     return ParsedCommand(
         intent=intent,

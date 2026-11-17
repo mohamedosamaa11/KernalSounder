@@ -55,9 +55,9 @@ class ParseCommandTests(unittest.TestCase):
         self.check("what apps are available", Intent.LIST_APPS)
         self.check("show processes", Intent.SHOW_PROCESSES)
 
-    def test_dangerous_text_is_unknown(self):
+    def test_dangerous_text_is_refused(self):
         for text in ("rm -rf /", "sudo shutdown now", "format c:"):
-            self.assertEqual(parse_command(text).intent, Intent.UNKNOWN, text)
+            self.assertEqual(parse_command(text).intent, Intent.DANGEROUS, text)
 
 
 if __name__ == "__main__":

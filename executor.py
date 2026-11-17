@@ -9,7 +9,9 @@ runs on Linux and Windows.
 
 from __future__ import annotations
 
+import difflib
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -158,28 +160,45 @@ def _protected_pids() -> set:
     return pids
 
 
-def _terminate(app_id: str) -> Optional[str]:
-    """Stop the user's own processes for the first matching name. Returns that name."""
+def _own_processes():
     try:
         me = psutil.Process().username()
     except psutil.Error:
         me = None
     skip = _protected_pids()
-    for name in closable_process_names(app_id):
-        target = name.lower()
-        victims = []
-        for proc in psutil.process_iter(["name", "username"]):
-            try:
-                pname = (proc.info.get("name") or "").lower()
-                if pname != target or proc.pid in skip:
-                    continue
-                if pname in PROTECTED_PROCESS_NAMES:
-                    continue
-                if me and proc.info.get("username") and proc.info["username"] != me:
-                    continue
-                victims.append(proc)
-            except psutil.Error:
+    for proc in psutil.process_iter(["name", "username"]):
+        try:
+            pname = (proc.info.get("name") or "").lower()
+            if not pname or proc.pid in skip or pname in PROTECTED_PROCESS_NAMES:
                 continue
+            if me and proc.info.get("username") and proc.info["username"] != me:
+                continue
+            yield proc, pname
+        except psutil.Error:
+            continue
+
+
+def _running_name_like(spoken: str) -> Optional[str]:
+    """Best running process name for a spoken app name ("spotify" -> spotify.exe)."""
+    want = re.sub(r"[^a-z0-9]", "", (spoken or "").lower())
+    if len(want) < 3:
+        return None
+    best, best_score = None, 0.0
+    for _proc, pname in _own_processes():
+        stem = re.sub(r"[^a-z0-9]", "", re.sub(r"\.exe$", "", pname))
+        score = 1.0 if stem == want else difflib.SequenceMatcher(None, want, stem).ratio()
+        if score > best_score:
+            best, best_score = pname, score
+    return best if best_score >= 0.85 else None
+
+
+def _terminate_names(names: List[str]) -> Optional[str]:
+    """Stop the user's own processes for the first name found running."""
+    for name in names:
+        target = name.lower()
+        if target in PROTECTED_PROCESS_NAMES:
+            continue
+        victims = [proc for proc, pname in _own_processes() if pname == target]
         if not victims:
             continue
         for proc in victims:
@@ -195,6 +214,37 @@ def _terminate(app_id: str) -> Optional[str]:
                 pass
         return name
     return None
+
+
+def _terminate(validation: ValidationResult) -> Optional[str]:
+    names: List[str] = []
+    if validation.app_id:
+        names += closable_process_names(validation.app_id)
+    entry = validation.catalog_app
+    if entry is not None:
+        names += list(getattr(entry, "process_names", []))
+    stopped = _terminate_names(names) if names else None
+    if stopped:
+        return stopped
+    query = getattr(entry, "name", None) or validation.close_query or validation.app_id or ""
+    guess = _running_name_like(query)
+    return _terminate_names([guess]) if guess else None
+
+
+def _launch_installed(entry) -> Optional[str]:
+    argv = list(entry.launch)
+    exe = _resolve_executable(argv[0])
+    if not exe:
+        return None
+    argv[0] = exe
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  cwd=str(WORKSPACE), close_fds=True)
+    if IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(argv, **kwargs)
+    return entry.name
 
 
 def _usage_snapshot() -> str:
@@ -300,19 +350,32 @@ def execute(command: ParsedCommand, validation: ValidationResult) -> ExecutionRe
             return ExecutionResult(True, f"Deleted {path.name}.", str(path), display)
 
         if intent == Intent.OPEN_APP:
-            started = _launch(validation.app_id or "")
+            entry = validation.catalog_app
+            if entry is not None:
+                started = _launch_installed(entry)
+                label = entry.name
+            else:
+                started = _launch(validation.app_id or "")
+                label = _friendly(validation.app_id)
             if not started:
-                msg = f"I could not find {_friendly(validation.app_id)} on this computer."
+                msg = f"I could not start {label} on this computer."
                 return ExecutionResult(False, msg, msg, display)
-            spoken = f"Opening {_friendly(validation.app_id)}."
+            spoken = f"Opening {label}."
             return ExecutionResult(True, spoken, f"{spoken} ({started})", display)
 
         if intent == Intent.CLOSE_APP:
-            stopped = _terminate(validation.app_id or "")
+            entry = validation.catalog_app
+            if entry is not None:
+                label = entry.name
+            elif validation.app_id:
+                label = _friendly(validation.app_id)
+            else:
+                label = validation.close_query or "that app"
+            stopped = _terminate(validation)
             if not stopped:
-                msg = f"{_friendly(validation.app_id)} is not running."
+                msg = f"{label} is not running."
                 return ExecutionResult(False, msg, msg, display)
-            spoken = f"Closed {_friendly(validation.app_id)}."
+            spoken = f"Closed {label}."
             return ExecutionResult(True, spoken, f"{spoken} ({stopped})", display)
 
         msg = "No executable action was produced."

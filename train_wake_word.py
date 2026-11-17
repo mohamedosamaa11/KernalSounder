@@ -22,6 +22,8 @@ Usage
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401
+
 import argparse
 import json
 import random
@@ -248,19 +250,29 @@ def _load_user_samples(name: str, negative: bool) -> List[np.ndarray]:
     return [np.load(p).astype(np.int16) for p in sorted(folder.glob("*.npy"))] if folder.is_dir() else []
 
 
-def _train_mlp(x: np.ndarray, y: np.ndarray, w: np.ndarray, hidden: int, epochs: int, seed: int):
+def _train_mlp(x: np.ndarray, y: np.ndarray, w: np.ndarray, hidden: int, epochs: int, seed: int,
+               init=None, anchor: float = 0.0, lr: float = 1e-3, verbose: bool = True,
+               progress=None):
+    """Adam on a 1-hidden-layer MLP. With `init` it fine-tunes; `anchor` pulls the
+    weights back toward `init` (L2-SP) so a few personal samples can't erase what
+    the base model learned."""
     rng = random.Random(seed)
     n, d = x.shape
-    scale1 = np.sqrt(2.0 / d)
-    noise = _noise(d * hidden, seed).reshape(d, hidden)
-    w1 = (noise * scale1 * np.sqrt(3)).astype(np.float32)
-    b1 = np.zeros(hidden, np.float32)
-    w2 = (_noise(hidden, seed + 1) * np.sqrt(3.0 / hidden)).astype(np.float32).reshape(hidden, 1)
-    b2 = np.zeros(1, np.float32)
+    if init is not None:
+        w1, b1, w2, b2 = (np.array(a, dtype=np.float32, copy=True) for a in init)
+        hidden = w1.shape[1]
+    else:
+        scale1 = np.sqrt(2.0 / d)
+        noise = _noise(d * hidden, seed).reshape(d, hidden)
+        w1 = (noise * scale1 * np.sqrt(3)).astype(np.float32)
+        b1 = np.zeros(hidden, np.float32)
+        w2 = (_noise(hidden, seed + 1) * np.sqrt(3.0 / hidden)).astype(np.float32).reshape(hidden, 1)
+        b2 = np.zeros(1, np.float32)
     params = [w1, b1, w2, b2]
+    origin = [p.copy() for p in params] if anchor > 0 else None
     m = [np.zeros_like(p) for p in params]
     v = [np.zeros_like(p) for p in params]
-    lr, beta1, beta2, eps, l2 = 1e-3, 0.9, 0.999, 1e-8, 1e-4
+    beta1, beta2, eps, l2 = 0.9, 0.999, 1e-8, 1e-4
     step = 0
     order = list(range(n))
     for epoch in range(epochs):
@@ -283,14 +295,19 @@ def _train_mlp(x: np.ndarray, y: np.ndarray, w: np.ndarray, hidden: int, epochs:
             gw1 = xb.T @ gh + l2 * w1
             gb1 = gh.sum(0)
             step += 1
-            for i, grad in enumerate((gw1, gb1, gw2, gb2)):
+            grads = [gw1, gb1, gw2, gb2]
+            if origin is not None:
+                grads = [g_ + anchor * (p_ - o_) for g_, p_, o_ in zip(grads, params, origin)]
+            for i, grad in enumerate(grads):
                 m[i] = beta1 * m[i] + (1 - beta1) * grad
                 v[i] = beta2 * v[i] + (1 - beta2) * grad * grad
                 mh = m[i] / (1 - beta1 ** step)
                 vh = v[i] / (1 - beta2 ** step)
                 params[i] -= (lr * mh / (np.sqrt(vh) + eps)).astype(np.float32)
-        if epoch % 5 == 4 or epoch == epochs - 1:
+        if verbose and (epoch % 5 == 4 or epoch == epochs - 1):
             print(f"  epoch {epoch + 1:3d}/{epochs}  loss {total / n:.4f}")
+        if progress is not None:
+            progress((epoch + 1) / epochs)
     return params
 
 
@@ -421,11 +438,42 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_personalize(args) -> int:
+    """Fast fine-tune (~30 s) from recordings made with `record`; same engine as the app's wizard."""
+    from personalize import personalize
+    from stt_engine import STTEngine
+
+    positives = _load_user_samples(args.name, False)
+    folder = _sample_dir(args.name, True)
+    background, extra = [], []
+    if folder.is_dir():
+        for path in sorted(folder.glob("*.npy")):
+            clip = np.load(path).astype(np.int16)
+            (extra if path.name.startswith("said_") else background).append(clip)
+    if len(positives) < 4:
+        print("Record at least 4 samples first: python train_wake_word.py record --count 10")
+        return 1
+    stt = STTEngine()
+    stt.load()
+    report = personalize(args.name, args.phrase, positives, background, stt=stt, extra_negatives=extra,
+                         progress=lambda f, m: print(f"\r  {int(f * 100):3d}%  {m:<50}", end="", flush=True))
+    print()
+    for key, value in report.items():
+        print(f"  {key:22s} {value}")
+    return 0
+
+
 def cmd_test(args) -> int:
     from audio import MicStream
     from wake_word import WakeWordDetector
 
-    det = WakeWordDetector(args.model, threshold=args.threshold)
+    model = args.model
+    if model is None:
+        from personalize import personal_model_path
+
+        personal = personal_model_path(args.name)
+        model = str(personal) if personal.is_file() else f"{args.name}.npz"
+    det = WakeWordDetector(model, threshold=args.threshold)
     mic = MicStream()
     mic.start()
     print(f"Say '{args.phrase}'. Ctrl+C to stop.")
@@ -462,11 +510,13 @@ def main(argv: Iterable[str] = None) -> int:
     tr.add_argument("--hidden", type=int, default=64)
     tr.add_argument("--epochs", type=int, default=30)
     tr.add_argument("--seed", type=int, default=11)
+    sub.add_parser("personalize", help="fast fine-tune (~30 s) on your recordings, like the app's wizard")
     te = sub.add_parser("test", help="live score meter from the mic")
-    te.add_argument("--model", default="hi_sounder.npz")
-    te.add_argument("--threshold", type=float, default=0.5)
+    te.add_argument("--model", default=None, help="default: your personal model if it exists")
+    te.add_argument("--threshold", type=float, default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
-    return {"record": cmd_record, "train": cmd_train, "test": cmd_test}[args.cmd](args)
+    return {"record": cmd_record, "train": cmd_train, "personalize": cmd_personalize,
+            "test": cmd_test}[args.cmd](args)
 
 
 if __name__ == "__main__":

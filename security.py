@@ -60,6 +60,7 @@ class Intent(str, Enum):
     LIST_APPS = "LIST_APPS"
     CONFIRM = "CONFIRM"
     CANCEL = "CANCEL"
+    DANGEROUS = "DANGEROUS"
     UNKNOWN = "UNKNOWN"
 
 
@@ -79,6 +80,8 @@ class ValidationResult:
     resolved_path: Optional[Path] = None
     extra_path: Optional[Path] = None
     app_id: Optional[str] = None
+    catalog_app: Optional[object] = None
+    close_query: Optional[str] = None
 
 
 class SecurityError(Exception):
@@ -149,10 +152,26 @@ def resolve_app(spoken_app: str) -> str:
     contained = [name for name in APP_WHITELIST if f" {name} " in padded]
     if contained:
         return APP_WHITELIST[max(contained, key=len)]
-    raise SecurityError(
-        f"I don't know the app '{spoken_app}'. "
-        "Try browser, files, terminal, videos, editor, or calculator."
-    )
+    raise SecurityError(f"I couldn't find an app called '{spoken_app}' on this computer.")
+
+
+def resolve_any_app(spoken_app: str):
+    """Curated alias first, then any installed app. Returns (app_id, catalog_entry)."""
+    key = (spoken_app or "").strip().lower()
+    if not key:
+        raise SecurityError("Which app? Say open, then the app name.")
+    if key in APP_WHITELIST:
+        return APP_WHITELIST[key], None
+    from app_catalog import CATALOG
+
+    CATALOG.wait(5.0)
+    found = CATALOG.find(key)
+    if found is not None:
+        entry, _score = found
+        if entry.denied:
+            raise SecurityError(f"{entry.name} is a system tool. I won't open it by voice.")
+        return None, entry
+    return resolve_app(key), None
 
 
 def closable_process_names(app_id: str) -> list:
@@ -171,6 +190,13 @@ def validate(command: ParsedCommand) -> ValidationResult:
     slots = command.slots
 
     try:
+        if intent == Intent.DANGEROUS:
+            return ValidationResult(
+                state=ValidationState.BLOCKED,
+                reason=slots.get("reason") or "That request is not allowed.",
+                action="(refused by the safety guard)",
+            )
+
         if intent == Intent.UNKNOWN:
             return ValidationResult(
                 state=ValidationState.ERROR,
@@ -244,7 +270,14 @@ def validate(command: ParsedCommand) -> ValidationResult:
             )
 
         if intent == Intent.OPEN_APP:
-            app_id = resolve_app(slots.get("app", ""))
+            app_id, entry = resolve_any_app(slots.get("app", ""))
+            if entry is not None:
+                return ValidationResult(
+                    state=ValidationState.SAFE,
+                    reason="Installed app, launched as the normal user (never elevated).",
+                    action=f"launch_installed({entry.name})",
+                    catalog_app=entry,
+                )
             return ValidationResult(
                 state=ValidationState.SAFE,
                 reason="Application is on the launch whitelist.",
@@ -253,14 +286,23 @@ def validate(command: ParsedCommand) -> ValidationResult:
             )
 
         if intent == Intent.CLOSE_APP:
-            app_id = resolve_app(slots.get("app", ""))
-            if not closable_process_names(app_id):
+            spoken = slots.get("app", "")
+            try:
+                app_id, entry = resolve_any_app(spoken)
+            except SecurityError as exc:
+                if not spoken.strip() or "system tool" in str(exc):
+                    raise
+                app_id, entry = None, None
+            if app_id is not None and not closable_process_names(app_id):
                 raise SecurityError("That app is part of the system and cannot be closed by voice.")
+            label = app_id or (entry.name if entry is not None else spoken)
             return ValidationResult(
                 state=ValidationState.SAFE,
-                reason="Close is limited to a whitelisted, non-critical process.",
-                action=f"terminate({app_id})",
+                reason="Close is limited to your own, non-system processes.",
+                action=f"terminate({label})",
                 app_id=app_id,
+                catalog_app=entry,
+                close_query=spoken,
             )
 
         if intent == Intent.SHOW_PROCESSES:

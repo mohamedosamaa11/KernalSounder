@@ -14,6 +14,8 @@ trained locally by train_wake_word.py (the default "Hi Sounder" model).
 
 from __future__ import annotations
 
+import lean_runtime  # noqa: F401
+
 import json
 from pathlib import Path
 from typing import Optional
@@ -55,7 +57,7 @@ def missing_feature_models() -> list:
 
 
 class WakeWordDetector:
-    def __init__(self, model: str, threshold: float = 0.5) -> None:
+    def __init__(self, model: str, threshold: Optional[float] = None) -> None:
         import onnxruntime as ort
 
         missing = missing_feature_models()
@@ -71,6 +73,8 @@ class WakeWordDetector:
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.log_severity_level = 3
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
         providers = ["CPUExecutionProvider"]
 
         def session(path: Path):
@@ -83,10 +87,12 @@ class WakeWordDetector:
         self._head = None
         self._ww = None
         self.phrase = None
+        self.meta: dict = {}
         if model_path.suffix.lower() == ".npz":
             with np.load(model_path) as data:
                 self._head = {k: data[k].astype(np.float32) for k in ("w1", "b1", "w2", "b2", "mu", "sigma")}
                 meta = json.loads(str(data["meta"])) if "meta" in data.files else {}
+            self.meta = meta
             self._n_frames = int(meta.get("frames", 16))
             self.phrase = meta.get("phrase")
         else:
@@ -97,7 +103,7 @@ class WakeWordDetector:
 
         self.model_path = model_path
         self.name = model_path.stem
-        self.threshold = threshold
+        self.threshold = float(threshold) if threshold is not None else float(self.meta.get("threshold", 0.5))
 
         self._initial_features = self._embed_clip(_pseudo_noise(16000 * 4))
         self.reset()

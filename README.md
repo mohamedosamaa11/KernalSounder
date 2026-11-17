@@ -43,10 +43,24 @@ offline on the CPU.
 
 ## Footprint (measured on a laptop, Windows 11, Python 3.12)
 
-| Piece | RAM | CPU |
+Whole app, running with the wake word on:
+
+| | RAM (private) | RAM (working set) | Idle CPU |
+| --- | --- | --- | --- |
+| v2.0 | 1,424 MB | 260 MB | ~26 % of one core |
+| **now** | **~190 MB** | **~200 MB** | **~2–3 %** in a quiet room |
+
+What made the difference (`lean_runtime.py`, applied before any library loads):
+numpy's OpenBLAS limited to one thread (it reserved ~480 MB for 16 threads),
+CTranslate2's Intel MKL backend switched off (`CT2_USE_MKL=0`, ~650 MB less,
+same transcripts, slightly faster), OpenMP threads told to sleep instead of
+spin-waiting, onnxruntime's memory arena disabled, and PyAV (FFmpeg) never
+loaded because only raw audio is transcribed.
+
+| Piece | Working set | CPU |
 | --- | --- | --- |
-| Wake word (3 small models) | ~20 MB | ~6 ms per 80 ms of audio (one core ≈ 8%) |
-| Whisper tiny.en int8 | ~120 MB | 0.45 s per command with 4 threads, ~1.3 s with 2 |
+| Wake word (3 small ONNX models + MLP head) | ~15 MB | ~1.6 ms per 80 ms of audio (~2 % of one core) |
+| Whisper tiny.en int8 | ~80 MB | 0.33 s per command with 4 threads, ~0.4 s with 2 (this laptop) |
 | Tk overlay | few MB | 0 when idle (animation runs only while open) |
 
 ## Commands
@@ -58,13 +72,35 @@ offline on the CPU.
 | `create folder called projects` | new folder |
 | `rename old.txt to new.txt` | rename, never overwrites |
 | `delete file notes.txt` | delete **after you say confirm** (empty folders only) |
-| `open browser` / `terminal` / `files` / `notepad` / `calculator` / `videos` | launch a **whitelisted** app |
-| `close firefox` | stop that app (system processes are protected) |
+| `open browser` / `terminal` / `files` / `notepad` / `calculator` / `videos` | launch a curated app |
+| `open spotify`, `open discord`, `open visual studio code` … | launch **any installed app** (fuzzy: "spot fire" → Spotify) |
+| `close spotify` | stop that app (only your own, non-system processes) |
 | `show processes` | top processes by CPU |
 | `show cpu ram and disk usage` | resource snapshot |
 | `help`, `what apps are available` | spoken help |
 
 All file operations are confined to `~/KernalSounderWorkspace`.
+
+Names can be said naturally: "create a file **named** Mohamed", "create file,
+**its name is** Anas", "make a folder **and call it** Projects", or spelled
+("M-O-H-A-M-E-D"). The name keeps your capitals. If you leave the name or app
+out ("create a file", "open"), it **asks** "What should I call the file?" and
+listens for the answer without needing the wake word again.
+
+### Installed apps
+
+At start-up the app reads every installed app: Start-menu apps on Windows
+(`Get-StartApps`, launched through `shell:AppsFolder` as the normal user) and
+visible `.desktop` apps on Linux (launched from their `Exec` line, no shell).
+App names are also given to the speech recognizer, so "Spotify" is heard
+correctly. Admin and destructive entries (Registry Editor, Disk Management,
+uninstallers, "reset" shortcuts …) are refused.
+
+### Personal vocabulary
+
+`vocabulary.txt` lists names and words you use (Mohamed, Ahmed, Anas …). They
+bias the recognizer, and near misses snap to your spelling ("Mohammed" →
+"Mohamed"). Add your own words, one per line.
 
 ## Install
 
@@ -124,17 +160,52 @@ Right-click the pill for **Talk now / Open dashboard / Quit**. Drag it anywhere.
    (melspectrogram → speech embedding), the same ones the app runs.
 4. A tiny MLP (1536 → 64 → 1, ~400 KB) is trained in numpy.
 
-At runtime, a trigger is double-checked by Whisper (without a vocabulary
-prompt, so "hi founder" is not "corrected" into "hi sounder").
+At runtime a trigger must first contain at least 0.45 s of real speech
+(WebRTC VAD, nearly free), then it is double-checked by Whisper (without a
+vocabulary prompt, so "hi founder" is not "corrected" into "hi sounder").
 
-**Make it fit your voice (recommended):**
+### Train my voice (in the app, ~2 minutes)
+
+Dashboard → **Train my voice**, or right-click the pill → **Train my voice…**
+
+1. Say "Hi Sounder" 10 times.
+2. Read 5 short ordinary sentences (your voice saying something else).
+3. Stay quiet 15 s so it hears your room (TV/fan is fine).
+
+Then, in ~30 s of CPU and no extra packages:
+
+- **Learns how the recognizer hears you.** If Whisper writes your
+  "Hi Sounder" as "hi someone", that word is accepted by the second-stage
+  check from now on. This alone fixes most "it ignores me" cases.
+- **Fine-tunes the wake model** on your recordings (augmented ~10x), with
+  negatives in your own voice (your sentences plus reversed/cut versions of
+  your clips), your room, look-alike phrases spoken by the OS voices
+  (SAPI / eSpeak, "hi santa", "hi cinder"…), and an L2-SP pull toward the
+  base weights so it can't forget what it learned.
+- **Only keeps the new model if it is better** on recordings it never trained
+  on, and sets its threshold just above the highest false score it saw.
+  Otherwise the original model stays. "Keep the original" undoes everything.
+
+The app switches to the new model immediately, no restart. Your recordings
+stay in `models/custom/hi_sounder_samples/` (git-ignored).
+
+Same thing from a terminal (useful on a server or over SSH):
+
+```bash
+python train_wake_word.py record --count 10            # say "Hi Sounder" 10 times
+python train_wake_word.py record --negative --seconds 15
+python train_wake_word.py personalize                  # ~30 s
+python train_wake_word.py test                         # live score meter
+```
+
+### Full retrain (heavy, optional)
+
+Rebuilds the base model from scratch with Piper (904 synthetic speakers) plus
+your recordings. ~20 minutes on a laptop CPU, longer on a small VM:
 
 ```bash
 pip install -r requirements-train.txt
-python train_wake_word.py record --count 20            # say "Hi Sounder" 20 times
-python train_wake_word.py record --negative --seconds 60
-python train_wake_word.py train                        # ~15 min on a laptop CPU
-python train_wake_word.py test                         # live score meter
+python train_wake_word.py train
 ```
 
 Train a different phrase: `python train_wake_word.py --name hey_kernel --phrase "Hey Kernel" train`,
@@ -142,6 +213,12 @@ then run with `--wake-model hey_kernel.npz --wake-phrase "Hey Kernel"`.
 
 ## Security rules
 
+- A safety guard (`guard.py`) runs **before** intent matching and refuses,
+  with a spoken reason: anything that targets the system, Windows, disks,
+  drives, registry, "everything/all", the workspace itself, documents or the
+  recycle bin; shutdown/restart/log off; sudo/admin/root; formatting;
+  installing/uninstalling; raw shell commands (`rm -rf`, "run this command");
+  passwords and keys. Example: "delete system" → *"I won't touch 'system'…"*.
 - Voice/text is never passed to a shell; there is no `shell=True` and no
   subprocess for file work.
 - Only whitelisted intents produce an action. Unknown text is blocked.
@@ -162,11 +239,18 @@ gui.py               optional dashboard window
 audio.py             mic stream, VAD command recorder, chime
 wake_word.py         openWakeWord feature pipeline on onnxruntime (+ .npz heads)
 stt_engine.py        faster-whisper (default) / Google, wake verification
-nlp_engine.py        intent + slot parser
+nlp_engine.py        intent + slot parser, follow-up answers
+guard.py             refusal rules for dangerous requests
+app_catalog.py       installed apps (Windows Start menu / Linux .desktop), fuzzy matching
+vocabulary.py        personal vocabulary (vocabulary.txt)
 security.py          sandbox + validator
 executor.py          cross-platform actions (no shell)
 config.py            all tunables, per-OS app tables
-train_wake_word.py   custom wake-word trainer
+train_wake_word.py   wake-word trainer (full retrain, record, personalize, test)
+personalize.py       fast on-device fine-tuning for your voice
+trainer_ui.py        "Train my voice" wizard
+os_tts.py            OS speech engine (SAPI / eSpeak) for look-alike replay
+lean_runtime.py      native-library settings that keep RAM/CPU low
 download_models.py   fetches the offline models
 autostart.py         start at login (Windows Startup / XDG autostart)
 tests/               unit tests: python -m unittest discover -s tests -t .

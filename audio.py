@@ -113,11 +113,11 @@ class CommandRecorder:
 
     FRAME = 320  # 20 ms at 16 kHz, a size WebRTC VAD accepts
 
-    def __init__(self) -> None:
+    def __init__(self, aggressiveness: int = VAD_AGGRESSIVENESS) -> None:
         try:
             import webrtcvad
 
-            self._vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+            self._vad = webrtcvad.Vad(aggressiveness)
         except Exception:
             self._vad = None
         self.reset()
@@ -138,6 +138,10 @@ class CommandRecorder:
     @property
     def heard_speech(self) -> bool:
         return self._speech_sec >= CAPTURE_MIN_SPEECH_SEC
+
+    def is_voiced(self, chunk: np.ndarray) -> bool:
+        """Public speech/no-speech decision for one chunk (updates the noise floor)."""
+        return self._voiced(chunk)
 
     def _voiced(self, chunk: np.ndarray) -> bool:
         rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32))))) if chunk.size else 0.0

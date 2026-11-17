@@ -78,7 +78,9 @@ class KernelSounderGUI:
                  overlay_callbacks: Optional[Dict[str, Callable[[], None]]] = None,
                  start_hidden: bool = False,
                  hint: str = "Click to talk",
-                 show_idle_pill: bool = True) -> None:
+                 show_idle_pill: bool = True,
+                 on_train: Optional[Callable[[], None]] = None) -> None:
+        self.on_train = on_train
         self.on_toggle_listen = on_toggle_listen
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
@@ -332,6 +334,9 @@ class KernelSounderGUI:
 
         go = self._button(controls, "Execute", lambda: self._submit_typed(None), ACCENT)
         go.pack(side=tk.RIGHT)
+        if self.on_train is not None:
+            train = self._button(controls, "Train my voice", self.on_train, WARN)
+            train.pack(side=tk.RIGHT, padx=(0, 8))
 
         self._handlers: Dict[str, Callable[..., None]] = {
             "metrics": self._on_metrics,
