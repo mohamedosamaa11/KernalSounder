@@ -56,7 +56,7 @@ from audio import CommandRecorder, MicStream, play_earcon, rms_level
 from config import CHUNK_SAMPLES, MODELS_DIR, SAMPLE_RATE
 from executor import ExecutionResult, execute
 from gui import KernelSounderGUI
-from nlp_engine import FALLBACK_TEXT, parse_command
+from nlp_engine import FALLBACK_TEXT, answer_to_slot, missing_slot, parse_command
 from security import (
     Intent,
     ParsedCommand,
@@ -89,6 +89,7 @@ class KernelSounder:
         self._stop = threading.Event()
         self._busy = threading.Lock()
         self._pending: Optional[PendingDelete] = None
+        self._awaiting: Optional[dict] = None
         self._pending_at = 0.0
         self._state = "idle"
         self._capture_reason = ""
@@ -101,6 +102,8 @@ class KernelSounder:
         self.mic: Optional[MicStream] = None
         self.wake = None
         self.recorder = CommandRecorder()
+        self.speech_gate = CommandRecorder()
+        self.gate_rejects = 0
         self.wake_enabled = WAKE_ENABLED and not args.no_wake
 
         hint = f"Say “{args.wake_phrase}”" if self.wake_enabled else "Click to talk"
@@ -171,8 +174,21 @@ class KernelSounder:
                 self.wake = None
                 self._log(f"Wake word unavailable: {exc}", "warn")
                 self.gui.emit("hint", text="Click to talk")
+        try:
+            from app_catalog import CATALOG
+
+            count = CATALOG.refresh()
+            self._log(f"Found {count} installed apps.", "info")
+        except Exception as exc:
+            self._log(f"App catalog unavailable: {exc}", "warn")
         started = time.monotonic()
         if self.stt.load():
+            try:
+                from app_catalog import CATALOG
+
+                self.stt.set_app_names(CATALOG.allowed_names())
+            except Exception:
+                pass
             self._log(f"Speech recognition ready: {self.stt.describe()} "
                       f"({time.monotonic() - started:.1f}s)", "ok")
             self.gui.emit("status", text="Ready. Say the wake word or press Talk.")
@@ -232,7 +248,9 @@ class KernelSounder:
             return
 
         last_wake = 0.0
-        recent: deque = deque(maxlen=max(1, int(WAKE_VERIFY_SEC * SAMPLE_RATE / CHUNK_SAMPLES)))
+        window = max(1, int(WAKE_VERIFY_SEC * SAMPLE_RATE / CHUNK_SAMPLES))
+        recent: deque = deque(maxlen=window)
+        voiced: deque = deque(maxlen=window)
         while not self._stop.is_set():
             chunk = self.mic.read(timeout=0.5)
             if chunk is None:
@@ -248,7 +266,7 @@ class KernelSounder:
                 continue
             if self._followup_after_tts:
                 self._followup_after_tts = False
-                if self._pending is not None:
+                if self._pending is not None or self._awaiting is not None:
                     self._begin_capture("followup")
                     continue
             if self._manual.is_set():
@@ -262,10 +280,16 @@ class KernelSounder:
                 wake.reset()
                 self._wake_dirty = False
             score = wake.process(chunk)
+            voiced.append(self.speech_gate.is_voiced(chunk))
             now = time.monotonic()
             if score >= wake.threshold and now - last_wake > WAKE_COOLDOWN_SEC:
                 last_wake = now
                 wake.reset()
+                speech_sec = sum(voiced) * CHUNK_SAMPLES / SAMPLE_RATE
+                if speech_sec < 0.3:
+                    self.gate_rejects += 1
+                    logging.debug("Wake %.3f ignored: only %.2fs of speech", score, speech_sec)
+                    continue
                 if self.args.verify:
                     ok, heard = self.stt.verify_keyword(np.concatenate(list(recent)), self.args.wake_phrase)
                     if ok is False:
@@ -302,6 +326,8 @@ class KernelSounder:
         if reason == "followup" and self._pending is not None:
             target = self._pending[1].resolved_path.name if self._pending[1].resolved_path else "it"
             self._ui("confirm", f"Delete {target}?  Say confirm or cancel.", "warn")
+        elif reason == "followup" and self._awaiting is not None:
+            self._ui("listening", self._awaiting["question"], "info")
         else:
             self._ui("listening", "Listening…", "muted")
 
@@ -316,6 +342,7 @@ class KernelSounder:
                 if reason == "followup" and self._pending is not None:
                     self.submit_text("cancel", source="gui")
                 else:
+                    self._awaiting = None
                     self._ui("idle")
             self._abort_quiet = False
             return
@@ -338,6 +365,9 @@ class KernelSounder:
             if reason == "followup" and self._pending is not None:
                 self._clear_pending("No answer, so the delete was cancelled.")
                 self.tts.speak("Delete cancelled.")
+            elif reason == "followup" and self._awaiting is not None:
+                self._awaiting = None
+                self._ui("result", "No answer, so I left it.", "muted")
             else:
                 self._ui("result", "I didn't hear a command.", "muted")
 
@@ -368,6 +398,7 @@ class KernelSounder:
                 self.tts.speak("Please say confirm or cancel.")
                 self._followup_after_tts = True
             else:
+                self._awaiting = None
                 self._ui("result", "Sorry, I didn't catch that.", "muted")
             return
         self._handle_text(text, source="voice")
@@ -418,9 +449,52 @@ class KernelSounder:
                 self._followup_after_tts = True
             return
 
+        if self._awaiting is not None and source != "gui":
+            awaiting, self._awaiting = self._awaiting, None
+            fresh = time.monotonic() - awaiting["at"] <= CONFIRM_TIMEOUT_SEC
+            standalone = (parsed.intent not in (Intent.UNKNOWN, Intent.CONFIRM, Intent.CANCEL)
+                          and parsed.confidence >= 0.85 and len(text.split()) >= 2
+                          and missing_slot(parsed) is None)
+            if fresh and parsed.intent == Intent.CANCEL:
+                self._ui("result", "Okay, cancelled.", "muted")
+                self.tts.speak("Okay, cancelled.")
+                return
+            if fresh and parsed.intent != Intent.DANGEROUS and not standalone:
+                value = answer_to_slot(awaiting["slot"], text)
+                if not value:
+                    self._ui("result", "Sorry, I didn't catch that.", "muted")
+                    return
+                parsed = ParsedCommand(intent=awaiting["intent"], slots={awaiting["slot"]: value},
+                                       raw_text=text, confidence=0.9)
+                self.gui.emit("intent", intent=parsed.intent.value, confidence=parsed.confidence,
+                              slots=f"{awaiting['slot']}={value}")
+                logging.info("Follow-up answer %r -> %s %s", text, parsed.intent.value, parsed.slots)
+
         if parsed.intent in (Intent.CONFIRM, Intent.CANCEL):
             self.gui.emit("validation", state="IDLE", reason="Nothing is waiting for confirmation.", action="")
             self._ui("result", "Nothing is waiting for confirmation.", "muted")
+            return
+
+        if parsed.intent == Intent.DANGEROUS:
+            reason = parsed.slots.get("reason", "That request is not allowed.")
+            self.gui.emit("validation", state=ValidationState.BLOCKED.value, reason=reason,
+                          action="(refused by the safety guard)")
+            self._log(f"SECURITY refused {text!r}: {reason}", "bad")
+            logging.warning("Security refusal: %r -> %s", text, reason)
+            self._ui("result", f"Refused: {reason}", "bad")
+            self.tts.speak(reason)
+            return
+
+        missing = missing_slot(parsed)
+        if missing is not None and parsed.intent != Intent.UNKNOWN:
+            slot, question = missing
+            self._awaiting = {"intent": parsed.intent, "slot": slot, "question": question,
+                              "at": time.monotonic()}
+            self.gui.emit("status", text=question)
+            self._ui("listening" if source == "voice" else "result", question, "info")
+            self.tts.speak(question)
+            if self.mic is not None and source == "voice":
+                self._followup_after_tts = True
             return
 
         if parsed.intent == Intent.UNKNOWN or parsed.confidence < 0.45:

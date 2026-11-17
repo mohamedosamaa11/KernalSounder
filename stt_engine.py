@@ -15,7 +15,7 @@ from __future__ import annotations
 import difflib
 import re
 import threading
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -39,12 +39,13 @@ class STTNetworkError(Exception):
 _PROMPT_WORDS = re.sub(r"[^a-z ]", " ", STT_VOCAB_PROMPT.lower()).split()
 
 
-def _looks_like_prompt_echo(text: str) -> bool:
+def _looks_like_prompt_echo(text: str, prompt: str = STT_VOCAB_PROMPT) -> bool:
     words = re.sub(r"[^a-z ]", " ", text.lower()).split()
-    if len(words) < 12:
+    if len(words) < 6:
         return False
     joined = " ".join(words)
-    return joined in " ".join(_PROMPT_WORDS)
+    prompt_words = " ".join(re.sub(r"[^a-z ]", " ", prompt.lower()).split())
+    return joined in prompt_words or joined in " ".join(_PROMPT_WORDS)
 
 
 class STTEngine:
@@ -57,6 +58,32 @@ class STTEngine:
         self._load_lock = threading.Lock()
         self.ready = threading.Event()
         self.last_error: Optional[str] = None
+        self._prompt = STT_VOCAB_PROMPT
+        self._app_names: List[str] = []
+
+    def set_app_names(self, names: List[str]) -> None:
+        """Bias recognition toward the installed apps and the personal vocabulary."""
+        self._app_names = list(names)
+        self._prompt = self._build_prompt()
+
+    def _build_prompt(self) -> str:
+        from vocabulary import load_vocabulary
+
+        apps = sorted({n for n in self._app_names
+                       if len(n) <= 24 and not re.search(r"[\d()&]", n)}, key=len)
+        words = ", ".join(load_vocabulary())
+        tail = (f"Names: {words}. " if words else "") + STT_VOCAB_PROMPT
+        tokenizer = getattr(self._model, "hf_tokenizer", None)
+
+        def size(text: str) -> int:
+            if tokenizer is None:
+                return len(text) // 4
+            return len(tokenizer.encode(" " + text).ids)
+
+        budget = 210
+        while apps and size("Apps: " + ", ".join(apps) + ". " + tail) > budget:
+            apps.pop()
+        return ("Apps: " + ", ".join(apps) + ". " + tail) if apps else tail
 
     def _status(self, text: str) -> None:
         if self._on_status:
@@ -129,7 +156,7 @@ class STTEngine:
             language="en",
             beam_size=WHISPER_BEAM_SIZE,
             temperature=0.0,
-            initial_prompt=STT_VOCAB_PROMPT,
+            initial_prompt=self._prompt,
             condition_on_previous_text=False,
             without_timestamps=True,
             vad_filter=False,
@@ -140,7 +167,7 @@ class STTEngine:
                 continue
             parts.append(seg.text)
         text = " ".join(parts).strip()
-        if _looks_like_prompt_echo(text):
+        if _looks_like_prompt_echo(text, self._prompt):
             return ""
         return text
 

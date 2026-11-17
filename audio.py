@@ -139,6 +139,10 @@ class CommandRecorder:
     def heard_speech(self) -> bool:
         return self._speech_sec >= CAPTURE_MIN_SPEECH_SEC
 
+    def is_voiced(self, chunk: np.ndarray) -> bool:
+        """Public speech/no-speech decision for one chunk (updates the noise floor)."""
+        return self._voiced(chunk)
+
     def _voiced(self, chunk: np.ndarray) -> bool:
         rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32))))) if chunk.size else 0.0
         if self._noise_floor is None:

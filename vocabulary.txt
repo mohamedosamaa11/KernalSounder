@@ -1,0 +1,24 @@
+# KernalSounder personal vocabulary
+# One word or name per line. These words are given to the speech recognizer
+# so it spells them your way, and close mishearings are corrected to them
+# ("Mohammed" -> "Mohamed"). Add the names and words you use often.
+Mohamed
+Ahmed
+Anas
+Youssef
+Omar
+Ali
+Mahmoud
+Mostafa
+Khaled
+Hassan
+Hussein
+Ibrahim
+Sara
+Nour
+Mariam
+Fatma
+Salma
+Yasmin
+Osama
+Kareem

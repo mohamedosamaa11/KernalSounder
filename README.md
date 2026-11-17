@@ -58,13 +58,35 @@ offline on the CPU.
 | `create folder called projects` | new folder |
 | `rename old.txt to new.txt` | rename, never overwrites |
 | `delete file notes.txt` | delete **after you say confirm** (empty folders only) |
-| `open browser` / `terminal` / `files` / `notepad` / `calculator` / `videos` | launch a **whitelisted** app |
-| `close firefox` | stop that app (system processes are protected) |
+| `open browser` / `terminal` / `files` / `notepad` / `calculator` / `videos` | launch a curated app |
+| `open spotify`, `open discord`, `open visual studio code` … | launch **any installed app** (fuzzy: "spot fire" → Spotify) |
+| `close spotify` | stop that app (only your own, non-system processes) |
 | `show processes` | top processes by CPU |
 | `show cpu ram and disk usage` | resource snapshot |
 | `help`, `what apps are available` | spoken help |
 
 All file operations are confined to `~/KernalSounderWorkspace`.
+
+Names can be said naturally: "create a file **named** Mohamed", "create file,
+**its name is** Anas", "make a folder **and call it** Projects", or spelled
+("M-O-H-A-M-E-D"). The name keeps your capitals. If you leave the name or app
+out ("create a file", "open"), it **asks** "What should I call the file?" and
+listens for the answer without needing the wake word again.
+
+### Installed apps
+
+At start-up the app reads every installed app: Start-menu apps on Windows
+(`Get-StartApps`, launched through `shell:AppsFolder` as the normal user) and
+visible `.desktop` apps on Linux (launched from their `Exec` line, no shell).
+App names are also given to the speech recognizer, so "Spotify" is heard
+correctly. Admin and destructive entries (Registry Editor, Disk Management,
+uninstallers, "reset" shortcuts …) are refused.
+
+### Personal vocabulary
+
+`vocabulary.txt` lists names and words you use (Mohamed, Ahmed, Anas …). They
+bias the recognizer, and near misses snap to your spelling ("Mohammed" →
+"Mohamed"). Add your own words, one per line.
 
 ## Install
 
@@ -124,8 +146,9 @@ Right-click the pill for **Talk now / Open dashboard / Quit**. Drag it anywhere.
    (melspectrogram → speech embedding), the same ones the app runs.
 4. A tiny MLP (1536 → 64 → 1, ~400 KB) is trained in numpy.
 
-At runtime, a trigger is double-checked by Whisper (without a vocabulary
-prompt, so "hi founder" is not "corrected" into "hi sounder").
+At runtime a trigger must first contain at least 0.3 s of real speech
+(WebRTC VAD, nearly free), then it is double-checked by Whisper (without a
+vocabulary prompt, so "hi founder" is not "corrected" into "hi sounder").
 
 **Make it fit your voice (recommended):**
 
@@ -142,6 +165,12 @@ then run with `--wake-model hey_kernel.npz --wake-phrase "Hey Kernel"`.
 
 ## Security rules
 
+- A safety guard (`guard.py`) runs **before** intent matching and refuses,
+  with a spoken reason: anything that targets the system, Windows, disks,
+  drives, registry, "everything/all", the workspace itself, documents or the
+  recycle bin; shutdown/restart/log off; sudo/admin/root; formatting;
+  installing/uninstalling; raw shell commands (`rm -rf`, "run this command");
+  passwords and keys. Example: "delete system" → *"I won't touch 'system'…"*.
 - Voice/text is never passed to a shell; there is no `shell=True` and no
   subprocess for file work.
 - Only whitelisted intents produce an action. Unknown text is blocked.
@@ -162,7 +191,10 @@ gui.py               optional dashboard window
 audio.py             mic stream, VAD command recorder, chime
 wake_word.py         openWakeWord feature pipeline on onnxruntime (+ .npz heads)
 stt_engine.py        faster-whisper (default) / Google, wake verification
-nlp_engine.py        intent + slot parser
+nlp_engine.py        intent + slot parser, follow-up answers
+guard.py             refusal rules for dangerous requests
+app_catalog.py       installed apps (Windows Start menu / Linux .desktop), fuzzy matching
+vocabulary.py        personal vocabulary (vocabulary.txt)
 security.py          sandbox + validator
 executor.py          cross-platform actions (no shell)
 config.py            all tunables, per-OS app tables
